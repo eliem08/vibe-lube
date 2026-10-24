@@ -1,15 +1,43 @@
 """Static inspection of AI-built ("vibe-coded") apps, with safe auto-fixes."""
+
 from __future__ import annotations
 
 import json
 import os
 import re
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 
 __all__ = ["Finding", "Report", "inspect", "apply_safe_fixes", "SERVICE_MENU"]
 
-SKIP_DIRS = {".git", "node_modules", "dist", "build", ".next", ".venv", "venv", "__pycache__", ".turbo", "coverage", ".vercel"}
-CODE_EXTS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".rb", ".go", ".php", ".vue", ".svelte", ".java", ".cs"}
+SKIP_DIRS = {
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    ".next",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".turbo",
+    "coverage",
+    ".vercel",
+}
+CODE_EXTS = {
+    ".js",
+    ".jsx",
+    ".ts",
+    ".tsx",
+    ".mjs",
+    ".cjs",
+    ".py",
+    ".rb",
+    ".go",
+    ".php",
+    ".vue",
+    ".svelte",
+    ".java",
+    ".cs",
+}
 TEXT_EXTS = CODE_EXTS | {".json", ".yml", ".yaml", ".toml", ".env", ".md", ".html", ".sh", ".txt", ".ini", ".cfg"}
 CLIENT_HINTS = ("src/", "app/", "pages/", "components/", "public/", "client/", "frontend/")
 
@@ -23,15 +51,36 @@ SECRET_PATTERNS = [
     ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----")),
     ("generic_secret", re.compile(r"""(?i)\b(?:api[_-]?key|secret|password|token)\b\s*[:=]\s*["'][^"'\s]{12,}["']""")),
 ]
-ENV_REF = re.compile(r"process\.env\.([A-Z][A-Z0-9_]+)|import\.meta\.env\.([A-Z][A-Z0-9_]+)|os\.environ(?:\.get)?\(\s*[\"']([A-Z][A-Z0-9_]+)|os\.getenv\(\s*[\"']([A-Z][A-Z0-9_]+)|os\.environ\[\s*[\"']([A-Z][A-Z0-9_]+)")
-PUBLIC_SECRET = re.compile(r"\b(?:NEXT_PUBLIC|VITE|REACT_APP|EXPO_PUBLIC)_[A-Z0-9_]*(?:SECRET|PRIVATE|SERVICE_ROLE|PASSWORD)[A-Z0-9_]*")
+ENV_REF = re.compile(
+    r"process\.env\.([A-Z][A-Z0-9_]+)|import\.meta\.env\.([A-Z][A-Z0-9_]+)|os\.environ(?:\.get)?\(\s*[\"']([A-Z][A-Z0-9_]+)|os\.getenv\(\s*[\"']([A-Z][A-Z0-9_]+)|os\.environ\[\s*[\"']([A-Z][A-Z0-9_]+)"
+)
+PUBLIC_SECRET = re.compile(
+    r"\b(?:NEXT_PUBLIC|VITE|REACT_APP|EXPO_PUBLIC)_[A-Z0-9_]*(?:SECRET|PRIVATE|SERVICE_ROLE|PASSWORD)[A-Z0-9_]*"
+)
 RISKY = [
     ("eval", "high", re.compile(r"(?<![\w.])eval\s*\("), "Remove eval(); parse data with JSON.parse or a real parser."),
-    ("sql_concat", "high", re.compile(r"""(?i)(?:execute|query|raw)\s*\(\s*(?:f["']|["'][^"']*(?:select|insert|update|delete)[^"']*["']\s*\+)"""),
-     "Use parameterised queries instead of building SQL strings."),
-    ("cors_wildcard", "medium", re.compile(r"""(?i)(?:access-control-allow-origin["']?\s*[:,]\s*["']\*|cors\(\s*\)|origin\s*:\s*["']\*["']|allow_origins\s*=\s*\[\s*["']\*)"""),
-     "Restrict CORS to your real domains."),
-    ("debug_mode", "medium", re.compile(r"(?i)\bdebug\s*=\s*true\b|app\.run\([^)]*debug\s*=\s*True"), "Turn off debug mode in production."),
+    (
+        "sql_concat",
+        "high",
+        re.compile(
+            r"""(?i)(?:execute|query|raw)\s*\(\s*(?:f["']|["'][^"']*(?:select|insert|update|delete)[^"']*["']\s*\+)"""
+        ),
+        "Use parameterised queries instead of building SQL strings.",
+    ),
+    (
+        "cors_wildcard",
+        "medium",
+        re.compile(
+            r"""(?i)(?:access-control-allow-origin["']?\s*[:,]\s*["']\*|cors\(\s*\)|origin\s*:\s*["']\*["']|allow_origins\s*=\s*\[\s*["']\*)"""
+        ),
+        "Restrict CORS to your real domains.",
+    ),
+    (
+        "debug_mode",
+        "medium",
+        re.compile(r"(?i)\bdebug\s*=\s*true\b|app\.run\([^)]*debug\s*=\s*True"),
+        "Turn off debug mode in production.",
+    ),
 ]
 SEVERITY_POINTS = {"critical": 25, "high": 12, "medium": 5, "low": 1}
 
@@ -97,7 +146,10 @@ def _gitignored(root: str, name: str) -> bool:
         return False
     with open(gi, encoding="utf-8", errors="ignore") as fh:
         patterns = [l.strip() for l in fh if l.strip() and not l.startswith("#")]
-    return any(p in {name, f"/{name}", f"{name}*", ".env*", "*.env", ".env.*"} or (p.endswith("*") and name.startswith(p[:-1])) for p in patterns)
+    return any(
+        p in {name, f"/{name}", f"{name}*", ".env*", "*.env", ".env.*"} or (p.endswith("*") and name.startswith(p[:-1]))
+        for p in patterns
+    )
 
 
 def inspect(root: str) -> Report:
@@ -115,9 +167,16 @@ def inspect(root: str) -> Report:
         ext = os.path.splitext(base)[1].lower()
         if re.search(r"(^|/)(tests?|__tests__|spec)(/|$)|\.(test|spec)\.\w+$|^test_.*\.py$", rel):
             has_tests = True
-        if base.startswith(".env") and base not in {".env.example", ".env.sample", ".env.template"}:
-            if not _gitignored(root, base):
-                add("env_not_ignored", "critical", path, 0, f"{base} is not in .gitignore", "Add it to .gitignore and rotate anything inside.")
+        is_env_file = base.startswith(".env") and base not in {".env.example", ".env.sample", ".env.template"}
+        if is_env_file and not _gitignored(root, base):
+            add(
+                "env_not_ignored",
+                "critical",
+                path,
+                0,
+                f"{base} is not in .gitignore",
+                "Add it to .gitignore and rotate anything inside.",
+            )
         if ext not in TEXT_EXTS and not base.startswith(".env"):
             continue
         try:
@@ -127,7 +186,12 @@ def inspect(root: str) -> Report:
             continue
         rep.files_scanned += 1
         is_code = ext in CODE_EXTS
-        is_client = is_code and ext in {".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".mjs"} and rel.startswith(CLIENT_HINTS) and "/api/" not in rel
+        is_client = (
+            is_code
+            and ext in {".js", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".mjs"}
+            and rel.startswith(CLIENT_HINTS)
+            and "/api/" not in rel
+        )
         if is_code and len(lines) > 1000:
             add("huge_file", "low", path, 0, f"{len(lines)} lines", "Split into smaller modules.")
         for i, line in enumerate(lines, 1):
@@ -135,15 +199,36 @@ def inspect(root: str) -> Report:
                 for name, rx in SECRET_PATTERNS:
                     m = rx.search(line)
                     if m and "example" not in line.lower() and "xxxx" not in m.group(0).lower():
-                        add("secret_in_code", "critical", path, i, f"{name}: {_mask(m.group(0))}", "Rotate this key now, then load it from an environment variable.")
+                        add(
+                            "secret_in_code",
+                            "critical",
+                            path,
+                            i,
+                            f"{name}: {_mask(m.group(0))}",
+                            "Rotate this key now, then load it from an environment variable.",
+                        )
                         break
             for m in ENV_REF.finditer(line):
                 env_vars.add(next(g for g in m.groups() if g))
             pm = PUBLIC_SECRET.search(line)
             if pm:
-                add("public_secret", "critical", path, i, f"{pm.group(0)} is bundled into the browser", "Rename without the public prefix and use it only server-side.")
+                add(
+                    "public_secret",
+                    "critical",
+                    path,
+                    i,
+                    f"{pm.group(0)} is bundled into the browser",
+                    "Rename without the public prefix and use it only server-side.",
+                )
             if is_client and re.search(r"service_role|SERVICE_ROLE", line):
-                add("service_role_client", "critical", path, i, "Supabase service_role used in client code", "Use the anon key in the browser and protect tables with RLS.")
+                add(
+                    "service_role_client",
+                    "critical",
+                    path,
+                    i,
+                    "Supabase service_role used in client code",
+                    "Use the anon key in the browser and protect tables with RLS.",
+                )
             if is_code:
                 for rule, sev, rx, fix in RISKY:
                     if rx.search(line):
@@ -158,31 +243,74 @@ def inspect(root: str) -> Report:
             except json.JSONDecodeError:
                 pkg = {}
             d = os.path.dirname(path)
-            if not any(os.path.exists(os.path.join(d, lf)) for lf in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock")):
-                add("no_lockfile", "medium", path, 0, "no lockfile next to package.json", "Commit your lockfile so installs are reproducible.")
+            if not any(
+                os.path.exists(os.path.join(d, lf))
+                for lf in ("package-lock.json", "yarn.lock", "pnpm-lock.yaml", "bun.lockb", "bun.lock")
+            ):
+                add(
+                    "no_lockfile",
+                    "medium",
+                    path,
+                    0,
+                    "no lockfile next to package.json",
+                    "Commit your lockfile so installs are reproducible.",
+                )
             for section in ("dependencies", "devDependencies"):
                 for dep, ver in (pkg.get(section) or {}).items():
                     if ver in {"*", "latest", ""}:
                         add("unpinned_dep", "medium", path, 0, f"{dep}@{ver}", "Pin to a specific version range.")
 
-    if env_vars and not any(os.path.exists(os.path.join(root, f)) for f in (".env.example", ".env.sample", ".env.template")):
-        rep.findings.append(Finding("missing_env_example", "low", ".env.example", 0, f"{len(env_vars)} env vars referenced, no .env.example",
-                                    "Run with --fix to generate one."))
+    if env_vars and not any(
+        os.path.exists(os.path.join(root, f)) for f in (".env.example", ".env.sample", ".env.template")
+    ):
+        rep.findings.append(
+            Finding(
+                "missing_env_example",
+                "low",
+                ".env.example",
+                0,
+                f"{len(env_vars)} env vars referenced, no .env.example",
+                "Run with --fix to generate one.",
+            )
+        )
     if not has_tests:
-        rep.findings.append(Finding("no_tests", "medium", "-", 0, "no test files found", "Add smoke tests for sign-up, payment and core flows."))
+        rep.findings.append(
+            Finding(
+                "no_tests",
+                "medium",
+                "-",
+                0,
+                "no test files found",
+                "Add smoke tests for sign-up, payment and core flows.",
+            )
+        )
     if not any(os.path.exists(os.path.join(root, f)) for f in ("README.md", "readme.md", "README")):
         rep.findings.append(Finding("no_readme", "low", "-", 0, "no README", "Document how to run and deploy the app."))
     if console_logs > 10:
-        rep.findings.append(Finding("console_logs", "low", "-", 0, f"{console_logs} console.log calls", "Remove or gate debug logging."))
+        rep.findings.append(
+            Finding("console_logs", "low", "-", 0, f"{console_logs} console.log calls", "Remove or gate debug logging.")
+        )
     if todos > 10:
-        rep.findings.append(Finding("todos", "low", "-", 0, f"{todos} TODO/FIXME markers", "Turn them into tracked issues."))
+        rep.findings.append(
+            Finding("todos", "low", "-", 0, f"{todos} TODO/FIXME markers", "Turn them into tracked issues.")
+        )
 
     rep.env_vars = sorted(env_vars)
     sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
     rep.findings.sort(key=lambda f: (sev_rank[f.severity], f.file, f.line))
     penalty = sum(SEVERITY_POINTS[f.severity] for f in rep.findings)
     rep.score = max(0, 100 - penalty)
-    rep.grade = "A" if rep.score >= 90 else "B" if rep.score >= 75 else "C" if rep.score >= 60 else "D" if rep.score >= 40 else "F"
+    rep.grade = (
+        "A"
+        if rep.score >= 90
+        else "B"
+        if rep.score >= 75
+        else "C"
+        if rep.score >= 60
+        else "D"
+        if rep.score >= 40
+        else "F"
+    )
     rules = {f.rule for f in rep.findings}
     rep.quote_minutes = sum(SERVICE_MENU[r][1] for r in rules)
     rep.quote_usd = sum(SERVICE_MENU[r][2] for r in rules)
@@ -195,7 +323,10 @@ def apply_safe_fixes(root: str, rep: Report) -> list[str]:
     rules = {f.rule for f in rep.findings}
     if "env_not_ignored" in rules:
         gi = os.path.join(root, ".gitignore")
-        existing = open(gi, encoding="utf-8").read() if os.path.exists(gi) else ""
+        existing = ""
+        if os.path.exists(gi):
+            with open(gi, encoding="utf-8") as fh:
+                existing = fh.read()
         add = [p for p in (".env", ".env.*", "!.env.example") if p not in existing.split()]
         with open(gi, "a", encoding="utf-8") as fh:
             fh.write(("\n" if existing and not existing.endswith("\n") else "") + "\n".join(add) + "\n")

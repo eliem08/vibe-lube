@@ -20,11 +20,19 @@ class Tests(unittest.TestCase):
         r = self.root = self.tmp.name
         write(r, "package.json", '{"dependencies": {"react": "latest", "next": "14.2.3"}}')
         write(r, ".env", "OPENAI_API_KEY=real\n")
-        write(r, "src/lib/ai.ts", f'const client = new OpenAI({{ apiKey: "{FAKE_OPENAI}" }});\n'
-                                  'const url = process.env.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY;\n'
-                                  'const x = eval(userInput);\n')
-        write(r, "server/db.py", 'cursor.execute(f"SELECT * FROM users WHERE id = {uid}")\napp.run(debug=True)\n'
-                                 'key = os.environ.get("STRIPE_KEY")\n')
+        write(
+            r,
+            "src/lib/ai.ts",
+            f'const client = new OpenAI({{ apiKey: "{FAKE_OPENAI}" }});\n'
+            "const url = process.env.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY;\n"
+            "const x = eval(userInput);\n",
+        )
+        write(
+            r,
+            "server/db.py",
+            'cursor.execute(f"SELECT * FROM users WHERE id = {uid}")\napp.run(debug=True)\n'
+            'key = os.environ.get("STRIPE_KEY")\n',
+        )
         write(r, "node_modules/pkg/index.js", f'const k = "{FAKE_OPENAI}"')
 
     def tearDown(self):
@@ -33,8 +41,20 @@ class Tests(unittest.TestCase):
     def test_findings(self):
         rep = inspect(self.root)
         rules = {f.rule for f in rep.findings}
-        expected = {"secret_in_code", "env_not_ignored", "public_secret", "service_role_client", "eval", "sql_concat",
-                    "debug_mode", "no_lockfile", "unpinned_dep", "missing_env_example", "no_tests", "no_readme"}
+        expected = {
+            "secret_in_code",
+            "env_not_ignored",
+            "public_secret",
+            "service_role_client",
+            "eval",
+            "sql_concat",
+            "debug_mode",
+            "no_lockfile",
+            "unpinned_dep",
+            "missing_env_example",
+            "no_tests",
+            "no_readme",
+        }
         self.assertTrue(expected <= rules, expected - rules)
         self.assertFalse(any("node_modules" in f.file for f in rep.findings))
         self.assertEqual(rep.grade, "F")

@@ -8,11 +8,35 @@ version = "0.1.0"
 description = "Jiffy Lube for vibe-coded apps: quick fixes when your AI-built app breaks"
 readme = "README.md"
 requires-python = ">=3.10"
-license = {text = "MIT"}
+license = { text = "MIT" }
+authors = [{ name = "eliem08" }]
 dependencies = []
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+dev = ["ruff>=0.6"]
 
 [project.scripts]
 vibe-lube = "vibe_lube.__main__:main"
 
+[project.urls]
+Repository = "https://github.com/eliem08/vibe-lube"
+
 [tool.setuptools]
 packages = ["vibe_lube"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I", "SIM", "RUF"]
+ignore = ["E501", "E741", "SIM108", "RUF001", "RUF002", "RUF003", "RUF022", "B905"]  # E501: ruff format owns line length
+
+[tool.ruff.lint.per-file-ignores]
+"vibe_lube/__init__.py" = ["F401", "F403"]
+"tests/*" = ["E501"]
