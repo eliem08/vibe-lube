@@ -9,13 +9,18 @@ from .core import SERVICE_MENU, apply_safe_fixes, inspect
 LABEL = {"critical": "CRIT", "high": "HIGH", "medium": "MED ", "low": "LOW "}
 
 
-def _run(argv=None):
+def build_parser():
     ap = argparse.ArgumentParser(prog="vibe-lube", description="Inspect and tune up AI-built apps.")
     sub = ap.add_subparsers(dest="cmd", required=True)
     i = sub.add_parser("inspect")
     i.add_argument("path")
     i.add_argument("--fix", action="store_true", help="apply safe, non-destructive fixes")
     i.add_argument("--json", action="store_true")
+    return ap
+
+
+def _run(argv=None):
+    ap = build_parser()
     a = ap.parse_args(argv)
     rep = inspect(a.path)
     if a.json:

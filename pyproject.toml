@@ -23,6 +23,7 @@ dev = ["ruff>=0.6"]
 
 [project.scripts]
 vibe-lube = "vibe_lube.__main__:main"
+vibe-lube-web = "vibe_lube.web:main"
 
 [project.urls]
 Repository = "https://github.com/eliem08/vibe-lube"
