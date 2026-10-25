@@ -325,7 +325,7 @@ def apply_safe_fixes(root: str, rep: Report) -> list[str]:
         gi = os.path.join(root, ".gitignore")
         existing = ""
         if os.path.exists(gi):
-            with open(gi, encoding="utf-8") as fh:
+            with open(gi, encoding="utf-8-sig") as fh:
                 existing = fh.read()
         add = [p for p in (".env", ".env.*", "!.env.example") if p not in existing.split()]
         with open(gi, "a", encoding="utf-8") as fh:
