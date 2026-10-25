@@ -46,7 +46,7 @@ Every plan starts with a 14-day free trial. Prices in USD, billed monthly unless
 | **Tune-up** | $149 per app | We fix every critical and high finding; Key rotation help; Re-scan |
 | **Pit crew** | $99 per month | Monthly scans; Fixes included up to 2 hours; Priority support |
 
-To start a trial or buy a plan, email **sales@YOUR-DOMAIN.com**.
+To start a trial or buy a plan, [request access](https://github.com/eliem08/vibe-lube/issues/new?title=Vibe%20Lube%20trial&labels=sales).
 
 ## Licence
 
