@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vibe Lube</title>
+<meta name="description" content="Quick fixes for apps built with AI, before they leak your keys.">
+<style>
+  :root { --bg:#fbfaf7; --fg:#1c1b19; --muted:#5d5a54; --card:#ffffff; --line:#e4e0d8; --accent:#2f5d50; --accent-fg:#ffffff; --code:#f1eee8; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141412; --fg:#ecebe7; --muted:#a8a49c; --card:#1d1c1a; --line:#33312d; --accent:#7fc4ad; --accent-fg:#10201b; --code:#22211e; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  main { max-width: 960px; margin: 0 auto; padding: 0 16px 64px; }
+  header { padding: 64px 0 40px; }
+  .brand { font-weight: 700; letter-spacing: .02em; color: var(--muted); text-transform: uppercase; font-size: 13px; }
+  h1 { font-size: clamp(30px, 5vw, 46px); line-height: 1.15; margin: 12px 0 16px; max-width: 18em; }
+  .lede { color: var(--muted); font-size: 18px; max-width: 40em; margin: 0 0 28px; }
+  .btn { display:inline-block; padding: 11px 18px; border-radius: 8px; border:1px solid var(--line); color: var(--fg); text-decoration:none; font-weight:600; }
+  .btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  .btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+  section { padding: 32px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: 22px; margin: 0 0 12px; }
+  .grid { display:grid; gap:16px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .plan { background: var(--card); border:1px solid var(--line); border-radius: 12px; padding: 20px; display:flex; flex-direction:column; }
+  .plan h3 { margin:0; font-size:18px; }
+  .price { font-size: 30px; font-weight: 700; margin: 8px 0 12px; }
+  .price span { display:block; font-size: 14px; font-weight: 400; color: var(--muted); }
+  .plan ul { padding-left: 18px; margin: 0 0 20px; flex:1; }
+  pre { background: var(--code); border:1px solid var(--line); border-radius: 10px; padding: 16px; overflow-x: auto; font-size: 14px; }
+  footer { color: var(--muted); font-size: 14px; padding-top: 32px; border-top: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="brand">Vibe Lube</div>
+    <h1>Quick fixes for apps built with AI, before they leak your keys.</h1>
+    <p class="lede">Inspect a repo for leaked secrets, env exposure and risky code, get a graded report with a fixed-price quote, and apply the safe fixes automatically.</p>
+    <a class="btn primary" href="mailto:sales@YOUR-DOMAIN.com?subject=Vibe Lube%20trial">Start a 14-day free trial</a>
+  </header>
+  <section>
+    <h2>Who it's for</h2>
+    <p>Non-technical founders who built an app with AI coding tools.</p>
+    <h2>The problem</h2>
+    <p>AI-built apps ship with exposed secrets, unignored .env files, risky code and no tests, and the founder can&#x27;t see it.</p>
+  </section>
+  <section>
+    <h2>Quickstart</h2>
+    <p>Python 3.10+, no other dependencies. Your release archive includes the wheel and examples.</p>
+    <pre><code>pip install vibe_lube-0.1.0-py3-none-any.whl
+vibe-lube inspect .
+vibe-lube inspect . --json</code></pre>
+  </section>
+  <section>
+    <h2>Pricing</h2>
+    <p>Every plan starts with a 14-day free trial. Prices in USD.</p>
+    <div class="grid">
+      <article class="plan">
+        <h3>Check-up</h3>
+        <p class="price">Free<span>scan</span></p>
+        <ul><li>Graded report</li><li>Fixed-price quote</li><li>Safe auto-fixes</li></ul>
+        <a class="btn primary" href="mailto:sales@YOUR-DOMAIN.com?subject=Vibe Lube Check-up">Get started free</a>
+      </article>
+      <article class="plan">
+        <h3>Tune-up</h3>
+        <p class="price">$149<span>per app</span></p>
+        <ul><li>We fix every critical and high finding</li><li>Key rotation help</li><li>Re-scan</li></ul>
+        <a class="btn" href="mailto:sales@YOUR-DOMAIN.com?subject=Vibe Lube Tune-up">Start free trial</a>
+      </article>
+      <article class="plan">
+        <h3>Pit crew</h3>
+        <p class="price">$99<span>per month</span></p>
+        <ul><li>Monthly scans</li><li>Fixes included up to 2 hours</li><li>Priority support</li></ul>
+        <a class="btn" href="mailto:sales@YOUR-DOMAIN.com?subject=Vibe Lube Pit crew">Start free trial</a>
+      </article>
+    </div>
+  </section>
+  <footer>&copy; 2026 Vibe Lube. All rights reserved. Questions: <a href="mailto:sales@YOUR-DOMAIN.com">sales@YOUR-DOMAIN.com</a></footer>
+</main>
+</body>
+</html>

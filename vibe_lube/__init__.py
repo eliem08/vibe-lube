@@ -1,4 +1,4 @@
-"""Jiffy Lube for vibe-coded apps: quick fixes when your AI-built app breaks."""
+"""Vibe Lube: Quick fixes for apps built with AI, before they leak your keys."""
 
 from .core import *
 

@@ -1,16 +1,44 @@
-# vibe-lube
+<!-- sell-kit:start -->
+# Vibe Lube
 
 [![CI](https://github.com/eliem08/vibe-lube/actions/workflows/ci.yml/badge.svg)](https://github.com/eliem08/vibe-lube/actions/workflows/ci.yml)
 
-> **Jiffy Lube for vibe-coded apps** — quick fixes when your AI-built app breaks.
+> **Quick fixes for apps built with AI, before they leak your keys.**
 
-Millions of apps are being built by people prompting Cursor, Lovable, Bolt
-and Claude. They ship fast and then break: leaked API keys, `.env` committed,
-no lockfile, `service_role` keys in the browser, wide-open CORS. `vibe-lube`
-is the 10-minute inspection: scan a repo, get a prioritised service report
-with plain-English fixes and a price menu, and auto-apply the safe ones.
+**Who it's for:** Non-technical founders who built an app with AI coding tools.
 
-## What the MVP does
+**The problem:** AI-built apps ship with exposed secrets, unignored .env files, risky code and no tests, and the founder can't see it.
+
+**What you get:** Inspect a repo for leaked secrets, env exposure and risky code, get a graded report with a fixed-price quote, and apply the safe fixes automatically.
+
+## Quickstart
+
+Customers receive a release archive with the wheel and the examples. Python 3.10+ and no other dependencies.
+
+```bash
+pip install vibe_lube-0.1.0-py3-none-any.whl
+vibe-lube inspect .
+vibe-lube inspect . --json
+```
+
+## Pricing
+
+Every plan starts with a 14-day free trial. Prices in USD, billed monthly unless noted.
+
+| Plan | Price | Includes |
+|---|---|---|
+| **Check-up** | Free scan | Graded report; Fixed-price quote; Safe auto-fixes |
+| **Tune-up** | $149 per app | We fix every critical and high finding; Key rotation help; Re-scan |
+| **Pit crew** | $99 per month | Monthly scans; Fixes included up to 2 hours; Priority support |
+
+To start a trial or buy a plan, email **sales@YOUR-DOMAIN.com**.
+
+## Licence
+
+Proprietary. Copyright (c) 2026 eliem08. All rights reserved. Use requires a paid plan or an active trial; see [LICENSE](LICENSE).
+<!-- sell-kit:end -->
+
+## What it does
 
 - **Inspection** of a project directory (skips `node_modules`, `.git`, build output):
   - **secrets**: OpenAI / Anthropic / AWS / GitHub / Slack / Stripe keys,
