@@ -83,6 +83,28 @@ class Tests(unittest.TestCase):
             self.assertEqual(rep.findings, [])
             self.assertEqual(rep.grade, "A")
 
+    def test_gitignore_is_read_like_git(self):
+        cases = [
+            (".env.*\n", ".env", True),  # .env.* does not cover .env itself
+            (".env*\n!.env.local\n", ".env.local", True),  # negation re-includes it
+            ("/.env\n", "backend/.env", True),  # anchored to the root only
+            (".env\n", "backend/.env", False),  # unanchored matches at any depth
+            (".env*\n", ".env.production", False),
+        ]
+        for gitignore, env_path, leaked in cases:
+            with self.subTest(gitignore=gitignore, env_path=env_path), tempfile.TemporaryDirectory() as r:
+                write(r, ".gitignore", gitignore)
+                write(r, env_path, "STRIPE_KEY=real\n")
+                rules = {f.rule for f in inspect(r).findings}
+                self.assertEqual("env_not_ignored" in rules, leaked)
+
+    def test_safe_fixes_never_overwrite_an_existing_env_example(self):
+        rep = inspect(self.root)
+        write(self.root, ".env.example", "# mine\nKEEP=1\n")
+        apply_safe_fixes(self.root, rep)
+        with open(os.path.join(self.root, ".env.example"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "# mine\nKEEP=1\n")
+
 
 if __name__ == "__main__":
     unittest.main()
