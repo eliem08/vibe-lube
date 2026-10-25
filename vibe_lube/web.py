@@ -17,14 +17,19 @@ Run:  <product>-web --port 8000 [--host 0.0.0.0] [--data-dir ./data]
 import argparse
 import base64
 import contextlib
+import hashlib
+import hmac
 import importlib
 import io
 import json
 import os
 import pathlib
+import secrets
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import zipfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -191,21 +196,130 @@ def run_op(op: dict, payload: dict, data_dir: pathlib.Path) -> dict:
         return result
 
 
+class Gate:
+    """API keys, a per-caller rate limit and usage metering (the record billing is built on).
+
+    Keys come from API_KEYS (comma-separated) and/or <data-dir>/api-keys.json, which stores only SHA-256
+    hashes. With no keys configured the API is open, which `main` allows only on a loopback address.
+    """
+
+    def __init__(self, data_dir: pathlib.Path, env_keys: str = "", rate_per_min: int = 60):
+        self.keys_file, self.usage_file = data_dir / "api-keys.json", data_dir / "usage.jsonl"
+        self.env = {_digest(k.strip()): f"env-{i}" for i, k in enumerate(env_keys.split(","), 1) if k.strip()}
+        self.rate = rate_per_min
+        self.hits: dict[str, list[float]] = {}
+        self.lock = threading.Lock()
+
+    def stored(self) -> dict:
+        try:
+            data = json.loads(self.keys_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def active(self) -> dict:
+        """hash -> key id for every key that may call the API."""
+        keys = dict(self.env)
+        keys.update({rec["hash"]: kid for kid, rec in self.stored().items() if not rec.get("revoked")})
+        return keys
+
+    def required(self) -> bool:
+        return bool(self.active())
+
+    def identify(self, header: str | None) -> str | None:
+        if not header or not header.startswith("Bearer "):
+            return None
+        digest = _digest(header[7:].strip())
+        found = None
+        for h, kid in self.active().items():  # compare every key in constant time; never short-circuit
+            if hmac.compare_digest(h, digest):
+                found = kid
+        return found
+
+    def retry_after(self, caller: str) -> int | None:
+        """Sliding one-minute window; returns seconds to wait when the caller is over the limit."""
+        now = time.monotonic()
+        with self.lock:
+            window = [t for t in self.hits.get(caller, []) if now - t < 60]
+            if len(window) >= self.rate:
+                self.hits[caller] = window
+                return max(1, int(60 - (now - window[0])) + 1)
+            window.append(now)
+            self.hits[caller] = window
+        return None
+
+    def record(self, caller: str, op: str, status: int, ms: int):
+        line = json.dumps(
+            {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "key": caller,
+                "op": op,
+                "status": status,
+                "ms": ms,
+            }
+        )
+        with self.lock, open(self.usage_file, "a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+
+    def create(self, label: str) -> tuple[str, str]:
+        key = "sk_" + secrets.token_urlsafe(24)
+        digest = _digest(key)
+        kid = digest[:10]
+        keys = self.stored()
+        keys[kid] = {"hash": digest, "label": label, "created": time.strftime("%Y-%m-%d"), "revoked": False}
+        self._save(keys)
+        return kid, key
+
+    def revoke(self, kid: str) -> bool:
+        keys = self.stored()
+        if kid not in keys:
+            return False
+        keys[kid]["revoked"] = True
+        self._save(keys)
+        return True
+
+    def _save(self, keys: dict):
+        tmp = self.keys_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(keys, indent=2), encoding="utf-8")
+        os.replace(tmp, self.keys_file)
+
+    def usage(self) -> dict:
+        summary: dict[str, dict] = {}
+        try:
+            lines = self.usage_file.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return summary
+        for ln in lines:
+            with contextlib.suppress(ValueError, KeyError):
+                rec = json.loads(ln)
+                s = summary.setdefault(rec["key"], {"calls": 0, "ok": 0, "by_op": {}})
+                s["calls"] += 1
+                s["ok"] += rec["status"] == 200
+                s["by_op"][rec["op"]] = s["by_op"].get(rec["op"], 0) + 1
+        return summary
+
+
+def _digest(key: str) -> str:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"{PKG}-web"
     data_dir: pathlib.Path
+    gate: Gate
 
-    def _send(self, status: int, body: bytes, ctype: str):
+    def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        for k, v in HEADERS.items():
+        for k, v in {**HEADERS, **(extra or {})}.items():
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(body)
 
-    def _json(self, status: int, obj):
-        self._send(status, json.dumps(obj, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+    def _json(self, status: int, obj, extra: dict | None = None):
+        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self._send(status, body, "application/json; charset=utf-8", extra)
 
     def log_message(self, fmt, *args):  # one line per request on stderr, no bodies
         sys.stderr.write(f"{self.address_string()} {fmt % args}\n")
@@ -236,12 +350,25 @@ class Handler(BaseHTTPRequestHandler):
         op = OPS.get(path.removeprefix("/api/")) if path.startswith("/api/") else None
         if not op:
             return self._json(404, {"error": "unknown command", "commands": sorted(OPS)})
+        caller = self.gate.identify(self.headers.get("Authorization"))
+        if caller is None and self.gate.required():
+            self.gate.record("unauthenticated", op["id"], 401, 0)
+            return self._json(401, {"error": "missing or invalid API key"}, {"WWW-Authenticate": "Bearer"})
+        caller = caller or f"ip:{self.client_address[0]}"
+        wait = self.gate.retry_after(caller)
+        if wait:
+            return self._json(
+                429, {"error": f"rate limit: {self.gate.rate} requests per minute"}, {"Retry-After": str(wait)}
+            )
+        started = time.monotonic()
         try:
             payload = json.loads(body or b"{}")
             result = run_op(op, payload, self.data_dir)
+            status = 200
         except (ValueError, BadRequest) as e:
-            return self._json(400, {"error": str(e)})
-        self._json(200, result)
+            result, status = {"error": str(e)}, 400
+        self.gate.record(caller, op["id"], status, int((time.monotonic() - started) * 1000))
+        self._json(status, result)
 
 
 def page() -> str:
@@ -290,13 +417,15 @@ input[type=checkbox]{{width:auto;display:inline-block;margin-left:8px}}small{{di
 button{{padding:9px 16px;border-radius:8px;border:0;background:var(--accent);color:var(--accent-fg);font-weight:600;cursor:pointer}}
 pre{{background:var(--code);border:1px solid var(--line);border-radius:8px;padding:12px;overflow:auto;max-height:420px;white-space:pre-wrap}}</style>
 </head><body><main><header><h1>{e(SPEC["name"])}</h1><p>{e(SPEC["tagline"])}</p>
-<p><small>API: POST /api/&lt;command&gt; with JSON. Spec: <a href="/api/spec">/api/spec</a></small></p></header>
+<p><small>API: POST /api/&lt;command&gt; with JSON and <code>Authorization: Bearer &lt;key&gt;</code>. Spec: <a href="/api/spec">/api/spec</a></small></p>
+<label>API key<input type="password" id="api-key" autocomplete="off" placeholder="sk_... (kept for this tab only)"></label></header>
 {"".join(forms)}</main><script src="/app.js"></script></body></html>"""
 
 
 APP_JS = """
 const readText = (f) => new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = no; r.readAsText(f); });
 const readB64 = (f) => new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(String(r.result).split(',')[1]); r.onerror = no; r.readAsDataURL(f); });
+try { document.getElementById('api-key').value = sessionStorage.getItem('apiKey') || ''; } catch (e) { /* storage blocked */ }
 document.querySelectorAll('input[type=file][data-for]').forEach((inp) => inp.addEventListener('change', async () => {
   const ta = inp.form.querySelector('textarea[name="' + inp.dataset.for + '"]');
   if (inp.files[0]) { ta.value = await readText(inp.files[0]); ta.dataset.filename = inp.files[0].name; }
@@ -320,7 +449,10 @@ document.querySelectorAll('form[data-op]').forEach((form) => form.addEventListen
     body[el.name] = kind === 'list' ? el.value.split(',').map((s) => s.trim()).filter(Boolean) : el.value;
   }
   try {
-    const res = await fetch('/api/' + form.dataset.op, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const headers = { 'Content-Type': 'application/json' };
+    const key = document.getElementById('api-key').value.trim();
+    if (key) { headers.Authorization = 'Bearer ' + key; sessionStorage.setItem('apiKey', key); }
+    const res = await fetch('/api/' + form.dataset.op, { method: 'POST', headers, body: JSON.stringify(body) });
     const data = await res.json();
     out.textContent = data.error ? 'Error: ' + data.error + (data.stdout ? '\\n\\n' + data.stdout : '')
       : (data.json ? JSON.stringify(data.json, null, 2) : data.stdout) + (data.files ? '\\n\\n' + Object.values(data.files).join('\\n') : '');
@@ -329,22 +461,82 @@ document.querySelectorAll('form[data-op]').forEach((form) => form.addEventListen
 """
 
 
-def make_server(host: str, port: int, data_dir: pathlib.Path) -> ThreadingHTTPServer:
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
+
+def make_server(
+    host: str, port: int, data_dir: pathlib.Path, env_keys: str = "", rate: int = 60
+) -> ThreadingHTTPServer:
     data_dir.mkdir(parents=True, exist_ok=True)
-    handler = type("BoundHandler", (Handler,), {"data_dir": data_dir.resolve()})
+    gate = Gate(data_dir.resolve(), env_keys, rate)
+    handler = type("BoundHandler", (Handler,), {"data_dir": data_dir.resolve(), "gate": gate})
     return ThreadingHTTPServer((host, port), handler)
 
 
+def keys_main(argv: list) -> int:
+    """<cli>-web keys create|list|revoke and <cli>-web usage: manage API keys and read metering."""
+    ap = argparse.ArgumentParser(prog=f"{SPEC['cli']}-web")
+    ap.add_argument("--data-dir", default=os.environ.get("DATA_DIR", "data"))
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    k = sub.add_parser("keys").add_subparsers(dest="action", required=True)
+    k.add_parser("create").add_argument("--label", required=True, help="who the key is for, e.g. a customer")
+    k.add_parser("list")
+    k.add_parser("revoke").add_argument("key_id")
+    sub.add_parser("usage", help="calls per key, for billing")
+    a = ap.parse_args(argv)
+    data_dir = pathlib.Path(a.data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    gate = Gate(data_dir.resolve())
+    if a.cmd == "usage":
+        print(json.dumps(gate.usage(), indent=2))
+    elif a.action == "create":
+        kid, key = gate.create(a.label)
+        print(f"key id {kid} for {a.label!r}\n{key}\nShown once; only its hash is stored.")
+    elif a.action == "list":
+        for kid, rec in gate.stored().items():
+            print(f"{kid}  {rec['created']}  {'REVOKED ' if rec.get('revoked') else ''}{rec['label']}")
+    elif not gate.revoke(a.key_id):
+        print(f"no key {a.key_id!r}", file=sys.stderr)
+        return 2
+    else:
+        print(f"revoked {a.key_id}")
+    return 0
+
+
 def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] in (["keys"], ["usage"]) or (len(argv) > 2 and argv[2] in ("keys", "usage")):
+        return keys_main(argv)
     ap = argparse.ArgumentParser(prog=f"{SPEC['cli']}-web", description=f"{SPEC['name']} hosted API and web app")
     ap.add_argument(
         "--host", default="127.0.0.1", help="use 0.0.0.0 to accept outside connections (e.g. in a container)"
     )
     ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8000")))
     ap.add_argument("--data-dir", default=os.environ.get("DATA_DIR", "data"), help="where server-side state is kept")
+    ap.add_argument(
+        "--rate", type=int, default=int(os.environ.get("RATE_LIMIT_PER_MIN", "60")), help="calls/min per caller"
+    )
+    ap.add_argument(
+        "--allow-public",
+        action="store_true",
+        default=os.environ.get("ALLOW_PUBLIC") == "1",
+        help="serve a non-loopback address without API keys (not recommended)",
+    )
     a = ap.parse_args(argv)
-    srv = make_server(a.host, a.port, pathlib.Path(a.data_dir))
-    print(f"{SPEC['name']} on http://{a.host}:{srv.server_address[1]}  (data: {pathlib.Path(a.data_dir).resolve()})")
+    srv = make_server(a.host, a.port, pathlib.Path(a.data_dir), os.environ.get("API_KEYS", ""), a.rate)
+    gate = srv.RequestHandlerClass.gate
+    if a.host not in LOOPBACK and not gate.required() and not a.allow_public:
+        srv.server_close()
+        print(
+            f"refusing to serve {a.host} with no API keys: run `{SPEC['cli']}-web keys create --label NAME` "
+            "or set API_KEYS (or pass --allow-public)",
+            file=sys.stderr,
+        )
+        return 2
+    access = "API keys required" if gate.required() else "open (no API keys)"
+    print(
+        f"{SPEC['name']} on http://{a.host}:{srv.server_address[1]}  ({access}; data: {pathlib.Path(a.data_dir).resolve()})"
+    )
     with contextlib.suppress(KeyboardInterrupt):
         srv.serve_forever()
     return 0
