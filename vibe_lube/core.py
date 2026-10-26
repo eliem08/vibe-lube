@@ -39,7 +39,23 @@ CODE_EXTS = {
     ".java",
     ".cs",
 }
-TEXT_EXTS = CODE_EXTS | {".json", ".yml", ".yaml", ".toml", ".env", ".md", ".html", ".sh", ".txt", ".ini", ".cfg"}
+TEXT_EXTS = CODE_EXTS | {
+    ".json",
+    ".yml",
+    ".yaml",
+    ".toml",
+    ".env",
+    ".md",
+    ".html",
+    ".sh",
+    ".txt",
+    ".ini",
+    ".cfg",
+    ".rules",
+    ".sql",
+}
+POLICY_EXTS = {".rules", ".sql", ".json"}  # database security rules and migrations
+POLICY_RULES = {"open_database_rules", "rls_disabled"}
 CLIENT_HINTS = ("src/", "app/", "pages/", "components/", "public/", "client/", "frontend/")
 
 SECRET_PATTERNS = [
@@ -49,6 +65,15 @@ SECRET_PATTERNS = [
     ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{36,}\b")),
     ("slack_token", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
     ("stripe_secret", re.compile(r"\bsk_live_[A-Za-z0-9]{20,}")),
+    ("stripe_restricted", re.compile(r"\brk_live_[A-Za-z0-9]{20,}")),
+    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
+    ("huggingface_token", re.compile(r"\bhf_[A-Za-z0-9]{34,}\b")),
+    ("sendgrid_key", re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b")),
+    ("twilio_key", re.compile(r"\bSK[0-9a-f]{32}\b")),
+    (
+        "database_url_password",
+        re.compile(r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^:/\s\"'@]+:[^@\s\"']{3,}@"),
+    ),
     ("private_key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |)PRIVATE KEY-----")),
     ("generic_secret", re.compile(r"""(?i)\b(?:api[_-]?key|secret|password|token)\b\s*[:=]\s*["'][^"'\s]{12,}["']""")),
 ]
@@ -82,6 +107,36 @@ RISKY = [
         re.compile(r"(?i)\bdebug\s*=\s*true\b|app\.run\([^)]*debug\s*=\s*True"),
         "Turn off debug mode in production.",
     ),
+    (
+        "tls_disabled",
+        "high",
+        re.compile(r"verify\s*=\s*False|rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*['\"]?0"),
+        "Keep certificate checks on; fix the certificate instead.",
+    ),
+    (
+        "xss_sink",
+        "medium",
+        re.compile(r"dangerouslySetInnerHTML|\.innerHTML\s*=(?!=)|v-html=|\{@html\s"),
+        "Render text, or sanitise HTML (e.g. DOMPurify) before inserting it.",
+    ),
+    (
+        "shell_injection",
+        "high",
+        re.compile(r"shell\s*=\s*True|child_process\.exec\(\s*`|\bexecSync\(\s*`|os\.system\(\s*f[\"']"),
+        "Pass arguments as a list without a shell; never format user input into a command.",
+    ),
+    (
+        "open_database_rules",
+        "critical",
+        re.compile(r"allow\s+read\s*,\s*write\s*:\s*if\s+true|\"\.(?:read|write)\"\s*:\s*true"),
+        "Anyone can read and write this database: require auth in the security rules.",
+    ),
+    (
+        "rls_disabled",
+        "critical",
+        re.compile(r"(?i)disable\s+row\s+level\s+security"),
+        "Keep Row Level Security on and add policies per table.",
+    ),
 ]
 SEVERITY_POINTS = {"critical": 25, "high": 12, "medium": 5, "low": 1}
 
@@ -97,6 +152,11 @@ SERVICE_MENU = {
     "sql_concat": ("Parameterise SQL queries", 30, 59),
     "cors_wildcard": ("Lock down CORS", 10, 19),
     "debug_mode": ("Disable debug in prod", 5, 9),
+    "tls_disabled": ("Re-enable TLS certificate checks", 10, 19),
+    "xss_sink": ("Sanitise HTML rendering", 20, 39),
+    "shell_injection": ("Remove shell command injection", 30, 59),
+    "open_database_rules": ("Lock down database security rules", 30, 59),
+    "rls_disabled": ("Turn on Row Level Security + policies", 60, 99),
     "no_tests": ("Add smoke tests for critical flows", 90, 149),
     "no_readme": ("Write README + run instructions", 15, 19),
     "huge_file": ("Split oversized file", 45, 69),
@@ -183,8 +243,8 @@ def inspect(root: str) -> Report:
         rel = os.path.relpath(path, root).replace("\\", "/")
         base = os.path.basename(path)
         ext = os.path.splitext(base)[1].lower()
-        if re.search(r"(^|/)(tests?|__tests__|spec)(/|$)|\.(test|spec)\.\w+$|^test_.*\.py$", rel):
-            has_tests = True
+        is_test = bool(re.search(r"(^|/)(tests?|__tests__|spec)(/|$)|\.(test|spec)\.\w+$|^test_.*\.py$", rel))
+        has_tests = has_tests or is_test
         is_env_file = base.startswith(".env") and base not in {".env.example", ".env.sample", ".env.template"}
         if is_env_file and not _gitignored(root, rel):
             add(
@@ -249,9 +309,9 @@ def inspect(root: str) -> Report:
                     "Supabase service_role used in client code",
                     "Use the anon key in the browser and protect tables with RLS.",
                 )
-            if is_code:
+            if is_code or ext in POLICY_EXTS:
                 for rule, sev, rx, fix in RISKY:
-                    if rx.search(line):
+                    if not is_test and (is_code or rule in POLICY_RULES) and rx.search(line):  # fixtures are not bugs
                         add(rule, sev, path, i, line.strip()[:100], fix)
                 if "console.log(" in line:
                     console_logs += 1

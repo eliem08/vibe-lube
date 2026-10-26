@@ -261,12 +261,18 @@ class Gate:
         with self.lock, open(self.usage_file, "a", encoding="utf-8") as fh:
             fh.write(line + "\n")
 
-    def create(self, label: str) -> tuple[str, str]:
+    def create(self, label: str, meta: dict | None = None) -> tuple[str, str]:
         key = "sk_" + secrets.token_urlsafe(24)
         digest = _digest(key)
         kid = digest[:10]
         keys = self.stored()
-        keys[kid] = {"hash": digest, "label": label, "created": time.strftime("%Y-%m-%d"), "revoked": False}
+        keys[kid] = {
+            "hash": digest,
+            "label": label,
+            "created": time.strftime("%Y-%m-%d"),
+            "revoked": False,
+            **(meta or {}),
+        }
         self._save(keys)
         return kid, key
 
@@ -277,6 +283,16 @@ class Gate:
         keys[kid]["revoked"] = True
         self._save(keys)
         return True
+
+    def revoke_where(self, field: str, value: str) -> int:
+        """Revoke every key whose record has field == value (e.g. a cancelled Stripe subscription)."""
+        keys, n = self.stored(), 0
+        for rec in keys.values():
+            if value and rec.get(field) == value and not rec.get("revoked"):
+                rec["revoked"], n = True, n + 1
+        if n:
+            self._save(keys)
+        return n
 
     def _save(self, keys: dict):
         tmp = self.keys_file.with_suffix(".tmp")
@@ -303,10 +319,133 @@ def _digest(key: str) -> str:
     return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
 
+class Billing:
+    """Self-serve purchase: Stripe Checkout -> signed webhook -> an API key shown to the buyer exactly once.
+
+    Configured by env: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, STRIPE_PRICES ("plan=price_id,..."),
+    PUBLIC_URL (the address customers reach). Disabled, with /pricing saying so, until all are set.
+    A cancelled subscription revokes its keys. A plaintext key waits in pending-keys.json only until the buyer
+    opens the success page; the Checkout session id, known only to Stripe and the buyer, unlocks it.
+    """
+
+    API = "https://api.stripe.com/v1"
+    TOLERANCE = 300
+
+    def __init__(self, data_dir: pathlib.Path, gate: Gate, env: dict | None = None):
+        env = os.environ if env is None else env
+        self.secret = env.get("STRIPE_SECRET_KEY", "")
+        self.hook_secret = env.get("STRIPE_WEBHOOK_SECRET", "")
+        self.public_url = env.get("PUBLIC_URL", "").rstrip("/")
+        self.prices = dict(item.split("=", 1) for item in env.get("STRIPE_PRICES", "").split(",") if "=" in item)
+        self.gate, self.pending_file = gate, data_dir / "pending-keys.json"
+        self.lock = threading.Lock()
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.secret and self.hook_secret and self.prices and self.public_url)
+
+    def _stripe(self, path: str, form: dict) -> dict:  # network call; tests replace it
+        import urllib.parse
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"{self.API}/{path}",
+            data=urllib.parse.urlencode(form).encode(),
+            headers={"Authorization": f"Bearer {self.secret}"},
+        )
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read())
+
+    def checkout(self, plan: str) -> str:
+        if not self.enabled:
+            raise BadRequest("self-serve checkout is not configured on this server")
+        price = self.prices.get(plan)
+        if not price:
+            raise BadRequest(f"unknown plan {plan!r}; choose one of {sorted(self.prices)}")
+        session = self._stripe(
+            "checkout/sessions",
+            {
+                "mode": "subscription",
+                "line_items[0][price]": price,
+                "line_items[0][quantity]": "1",
+                "metadata[plan]": plan,
+                "success_url": f"{self.public_url}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
+                "cancel_url": f"{self.public_url}/pricing",
+            },
+        )
+        return session["url"]
+
+    def verify(self, body: bytes, header: str, now: float | None = None) -> dict:
+        """Stripe-Signature check: HMAC-SHA256 of "<t>.<body>", constant time, within a 5-minute window."""
+        parts: dict[str, list] = {}
+        for item in (header or "").split(","):
+            k, _, v = item.partition("=")
+            parts.setdefault(k.strip(), []).append(v.strip())
+        try:
+            ts = int(parts["t"][0])
+        except (KeyError, ValueError):
+            raise BadRequest("bad signature header") from None
+        expected = hmac.new(self.hook_secret.encode(), f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
+        if not self.hook_secret or not any(hmac.compare_digest(expected, sig) for sig in parts.get("v1", [])):
+            raise BadRequest("signature mismatch")
+        if abs((time.time() if now is None else now) - ts) > self.TOLERANCE:
+            raise BadRequest("signature too old")
+        return json.loads(body)
+
+    def handle(self, event: dict) -> str:
+        kind, obj = event.get("type"), (event.get("data") or {}).get("object") or {}
+        if kind == "checkout.session.completed":
+            sid = obj.get("id", "")
+            with self.lock:
+                pending = self._pending()
+                if not sid or sid in pending:
+                    return "duplicate"  # Stripe retries webhooks; one key per purchase
+                email = (obj.get("customer_details") or {}).get("email") or "customer"
+                kid, key = self.gate.create(
+                    email,
+                    {
+                        "plan": (obj.get("metadata") or {}).get("plan", ""),
+                        "subscription": obj.get("subscription") or "",
+                        "customer": obj.get("customer") or "",
+                    },
+                )
+                pending[sid] = {"key": key, "kid": kid}
+                self._save(pending)
+            return f"issued {kid}"
+        if kind == "customer.subscription.deleted":
+            return f"revoked {self.gate.revoke_where('subscription', obj.get('id', ''))}"
+        return "ignored"
+
+    def claim(self, session_id: str) -> str | None:
+        """Hand the key over once, then forget the plaintext."""
+        with self.lock:
+            pending = self._pending()
+            rec = pending.get(session_id)
+            if not rec or "key" not in rec:
+                return None
+            key = rec.pop("key")
+            rec["claimed"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._save(pending)
+            return key
+
+    def _pending(self) -> dict:
+        try:
+            data = json.loads(self.pending_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save(self, data: dict):
+        tmp = self.pending_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        os.replace(tmp, self.pending_file)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"{PKG}-web"
     data_dir: pathlib.Path
     gate: Gate
+    billing: Billing
 
     def _send(self, status: int, body: bytes, ctype: str, extra: dict | None = None):
         self.send_response(status)
@@ -334,6 +473,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, APP_JS.encode("utf-8"), "text/javascript; charset=utf-8")
         elif path in ("/", "/index.html"):
             self._send(200, page().encode("utf-8"), "text/html; charset=utf-8")
+        elif path == "/pricing":
+            self._send(200, pricing_page(self.billing).encode("utf-8"), "text/html; charset=utf-8")
+        elif path == "/billing/success":
+            from urllib.parse import parse_qs, urlsplit
+
+            sid = (parse_qs(urlsplit(self.path).query).get("session_id") or [""])[0]
+            key = self.billing.claim(sid) if sid else None
+            html_out = success_page(key, bool(sid)).encode("utf-8")
+            self._send(200, html_out, "text/html; charset=utf-8", {"Cache-Control": "no-store"})
         else:
             self._json(404, {"error": "not found"})
 
@@ -347,11 +495,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": f"request over {MAX_BODY} bytes"})
         # always read the body before answering: closing with unread data makes some stacks reset the connection
         body = self.rfile.read(length)
+        if path == "/billing/webhook":
+            try:
+                note = self.billing.handle(self.billing.verify(body, self.headers.get("Stripe-Signature", "")))
+            except (ValueError, BadRequest) as e:
+                return self._json(400, {"error": str(e)})
+            return self._json(200, {"received": True, "result": note})
+        if path == "/billing/checkout":
+            from urllib.parse import parse_qs
+
+            plan = (parse_qs(body.decode("utf-8", "replace")).get("plan") or [""])[0]
+            try:
+                url = self.billing.checkout(plan)
+            except (BadRequest, OSError, KeyError, ValueError) as e:
+                return self._json(400, {"error": str(e)})
+            return self._send(303, b"", "text/plain", {"Location": url})
         op = OPS.get(path.removeprefix("/api/")) if path.startswith("/api/") else None
         if not op:
             return self._json(404, {"error": "unknown command", "commands": sorted(OPS)})
         caller = self.gate.identify(self.headers.get("Authorization"))
-        if caller is None and self.gate.required():
+        if caller is None and (self.gate.required() or self.billing.enabled):
             self.gate.record("unauthenticated", op["id"], 401, 0)
             return self._json(401, {"error": "missing or invalid API key"}, {"WWW-Authenticate": "Bearer"})
         caller = caller or f"ip:{self.client_address[0]}"
@@ -369,6 +532,62 @@ class Handler(BaseHTTPRequestHandler):
             result, status = {"error": str(e)}, 400
         self.gate.record(caller, op["id"], status, int((time.monotonic() - started) * 1000))
         self._json(status, result)
+
+
+def _shell(title: str, inner: str) -> str:
+    import html
+
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>{html.escape(title)}</title>
+<style>:root{{--bg:#fbfaf7;--fg:#1c1b19;--muted:#5d5a54;--card:#fff;--line:#e4e0d8;--accent:#2f5d50;--accent-fg:#fff;--code:#f1eee8}}
+@media (prefers-color-scheme: dark){{:root{{--bg:#141412;--fg:#ecebe7;--muted:#a8a49c;--card:#1d1c1a;--line:#33312d;--accent:#7fc4ad;--accent-fg:#10201b;--code:#22211e}}}}
+body{{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}}
+main{{max-width:720px;margin:0 auto;padding:32px 16px}}a{{color:var(--accent)}}
+section{{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px;margin:16px 0}}
+button{{padding:9px 16px;border-radius:8px;border:0;background:var(--accent);color:var(--accent-fg);font-weight:600;cursor:pointer}}
+code,pre{{background:var(--code);border-radius:6px;padding:2px 6px;word-break:break-all;white-space:pre-wrap}}small{{color:var(--muted)}}</style>
+</head><body><main><p><a href="/">{html.escape(SPEC["name"])}</a></p>{inner}</main></body></html>"""
+
+
+def pricing_page(billing: Billing) -> str:
+    import html
+
+    e = html.escape
+    if not billing.enabled:
+        return _shell(
+            "Pricing",
+            "<h1>Pricing</h1><p>Self-serve checkout is not enabled on this server yet. "
+            "See the product README for plans.</p>",
+        )
+    cards = "".join(
+        f'<section><h2>{e(plan.title())}</h2><form method="post" action="/billing/checkout">'
+        f'<input type="hidden" name="plan" value="{e(plan)}"><button>Subscribe</button></form></section>'
+        for plan in billing.prices
+    )
+    return _shell(
+        "Pricing",
+        f"<h1>{e(SPEC['name'])} plans</h1><p>{e(SPEC['tagline'])}</p>{cards}"
+        "<p><small>Payments by Stripe. Your API key appears right after checkout.</small></p>",
+    )
+
+
+def success_page(key: str | None, had_session: bool) -> str:
+    import html
+
+    if key:
+        return _shell(
+            "Your API key",
+            "<h1>You are in</h1><p>Your API key, shown once. Store it now:</p>"
+            f"<pre>{html.escape(key)}</pre><p>Send it as <code>Authorization: Bearer &lt;key&gt;</code> "
+            'or paste it into the <a href="/">web app</a>.</p>',
+        )
+    if had_session:
+        return _shell(
+            "Almost there",
+            "<h1>Payment received</h1><p>Your key is being issued: reload this page in a few seconds. "
+            "A key is shown only once; if you already saw it, ask support to rotate it.</p>",
+        )
+    return _shell("Not found", "<h1>Nothing to show</h1>")
 
 
 def page() -> str:
@@ -465,11 +684,13 @@ LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
 
 def make_server(
-    host: str, port: int, data_dir: pathlib.Path, env_keys: str = "", rate: int = 60
+    host: str, port: int, data_dir: pathlib.Path, env_keys: str = "", rate: int = 60, env: dict | None = None
 ) -> ThreadingHTTPServer:
     data_dir.mkdir(parents=True, exist_ok=True)
     gate = Gate(data_dir.resolve(), env_keys, rate)
-    handler = type("BoundHandler", (Handler,), {"data_dir": data_dir.resolve(), "gate": gate})
+    billing = Billing(data_dir.resolve(), gate, env)
+    bound = {"data_dir": data_dir.resolve(), "gate": gate, "billing": billing}
+    handler = type("BoundHandler", (Handler,), bound)
     return ThreadingHTTPServer((host, port), handler)
 
 
@@ -525,7 +746,8 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     srv = make_server(a.host, a.port, pathlib.Path(a.data_dir), os.environ.get("API_KEYS", ""), a.rate)
     gate = srv.RequestHandlerClass.gate
-    if a.host not in LOOPBACK and not gate.required() and not a.allow_public:
+    selling = srv.RequestHandlerClass.billing.enabled  # a server that sells keys will require them
+    if a.host not in LOOPBACK and not gate.required() and not selling and not a.allow_public:
         srv.server_close()
         print(
             f"refusing to serve {a.host} with no API keys: run `{SPEC['cli']}-web keys create --label NAME` "
@@ -534,6 +756,8 @@ def main(argv=None) -> int:
         )
         return 2
     access = "API keys required" if gate.required() else "open (no API keys)"
+    if selling:
+        access += "; Stripe checkout on /pricing"
     print(
         f"{SPEC['name']} on http://{a.host}:{srv.server_address[1]}  ({access}; data: {pathlib.Path(a.data_dir).resolve()})"
     )

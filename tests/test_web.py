@@ -2,6 +2,8 @@
 
 import base64
 import contextlib
+import hashlib
+import hmac
 import http.client
 import io
 import json
@@ -9,6 +11,7 @@ import os
 import pathlib
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -148,6 +151,77 @@ class WebAppTests(unittest.TestCase):
                 code = web.main(["--host", "0.0.0.0", "--port", "0", "--data-dir", t])
         self.assertEqual(code, 2)
         self.assertIn("refusing", err.getvalue())
+
+    def test_stripe_purchase_issues_one_key_and_cancellation_revokes_it(self):
+        env = {
+            "STRIPE_SECRET_KEY": "sk_test_x",
+            "STRIPE_WEBHOOK_SECRET": "whsec_test",
+            "STRIPE_PRICES": "starter=price_1",
+            "PUBLIC_URL": "https://example.test",
+        }
+        with tempfile.TemporaryDirectory() as t:
+            srv = web.make_server("127.0.0.1", 0, pathlib.Path(t), env=env)
+            billing = srv.RequestHandlerClass.billing
+            sent = {}
+            billing._stripe = lambda path, form: sent.update(form) or {"url": "https://checkout.test/s"}
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+            def hook(event, secret="whsec_test", ts=None):
+                body = json.dumps(event).encode()
+                ts = int(time.time()) if ts is None else ts
+                sig = hmac.new(secret.encode(), f"{ts}.".encode() + body, hashlib.sha256).hexdigest()
+                req = urllib.request.Request(
+                    base + "/billing/webhook", data=body, headers={"Stripe-Signature": f"t={ts},v1={sig}"}
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=30) as r:
+                        return r.status
+                except urllib.error.HTTPError as e:
+                    with e:
+                        return e.code
+
+            try:
+                self.assertIn(b"Subscribe", urllib.request.urlopen(base + "/pricing", timeout=30).read())
+                conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=30)
+                conn.request("POST", "/billing/checkout", "plan=starter")
+                res = conn.getresponse()
+                self.assertEqual((res.status, res.getheader("Location")), (303, "https://checkout.test/s"))
+                conn.close()
+                self.assertEqual(sent["line_items[0][price]"], "price_1")
+                # a selling server never serves the API without a key, even before the first sale
+                self.assertEqual(self.call_at(base, f"/api/{SPEC['ops'][0]['id']}")[0], 401)
+                done = {
+                    "type": "checkout.session.completed",
+                    "data": {"object": {"id": "cs_1", "subscription": "sub_1", "customer_details": {"email": "a@b.c"}}},
+                }
+                self.assertEqual(hook(done, secret="whsec_wrong"), 400)
+                self.assertEqual(hook(done, ts=int(time.time()) - 3600), 400)
+                self.assertEqual(hook(done), 200)
+                self.assertEqual(hook(done), 200)  # Stripe retry: still one key
+                gate = srv.RequestHandlerClass.gate
+                self.assertEqual(len(gate.stored()), 1)
+                page = urllib.request.urlopen(base + "/billing/success?session_id=cs_1", timeout=30).read().decode()
+                key = page.split("<pre>")[1].split("</pre>")[0]
+                self.assertTrue(key.startswith("sk_"))
+                again = urllib.request.urlopen(base + "/billing/success?session_id=cs_1", timeout=30).read().decode()
+                self.assertNotIn(key, again)  # shown exactly once
+                self.assertNotIn(key, (pathlib.Path(t) / "pending-keys.json").read_text(encoding="utf-8"))
+                self.assertIsNotNone(gate.identify(f"Bearer {key}"))
+                hook({"type": "customer.subscription.deleted", "data": {"object": {"id": "sub_1"}}})
+                self.assertIsNone(gate.identify(f"Bearer {key}"))
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+    def call_at(self, base, path):
+        req = urllib.request.Request(base + path, data=b"{}", headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=90) as r:
+                return r.status, r.headers, r.read()
+        except urllib.error.HTTPError as e:
+            with e:
+                return e.code, e.headers, e.read()
 
     def test_user_text_never_becomes_an_option(self):
         op = {

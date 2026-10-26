@@ -1,0 +1,22 @@
+# One-click deploy: https://render.com/deploy?repo=https://github.com/eliem08/vibe-lube
+services:
+  - type: web
+    name: vibe-lube
+    runtime: docker
+    plan: starter
+    healthCheckPath: /healthz
+    disk:
+      name: data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: API_KEYS
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICES
+        sync: false
+      - key: PUBLIC_URL
+        sync: false
