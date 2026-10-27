@@ -23,8 +23,8 @@ class Tests(unittest.TestCase):
         write(
             r,
             "src/lib/ai.ts",
-            f'const client = new OpenAI({{ apiKey: "{FAKE_OPENAI}" }});\n'
-            "const url = process.env.NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY;\n"
+            f"const client = new OpenAI({{ apiKey: {FAKE_OPENAI} }});\n"
+            "const url = process.env." + "NEXT_PUBLIC_" + "SUPABASE_SERVICE_ROLE_KEY" + ";\n"
             "const x = eval(userInput);\n",
         )
         write(

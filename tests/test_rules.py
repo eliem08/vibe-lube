@@ -6,7 +6,7 @@ from vibe_lube.core import SERVICE_MENU, inspect
 
 # Fake keys are assembled at runtime so this file never contains a scannable secret.
 FILES = {
-    "server/db.py": "DB = 'postgres://admin:hunter22@db.internal:5432/app'\n",
+    "server/db.py": "DB = 'postgres://admin:" + "hunter22" + "@db.internal:5432/app'\n",
     "server/mail.py": "KEY = '" + "SG." + "a" * 22 + "." + "b" * 43 + "'\n",
     "server/google.js": "const k = '" + "AIza" + "c" * 35 + "';\n",
     "server/hf.py": "token = '" + "hf_" + "d" * 34 + "'\n",
