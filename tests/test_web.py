@@ -223,6 +223,25 @@ class WebAppTests(unittest.TestCase):
             with e:
                 return e.code, e.headers, e.read()
 
+    def test_unwritable_data_dir_refuses_to_start(self):
+        with tempfile.TemporaryDirectory() as t:
+            real_write = pathlib.Path.write_text
+
+            def read_only_disk(path, *args, **kwargs):  # what a root-owned mount looks like to the app
+                if path.name == ".write-check":
+                    raise PermissionError(13, "Permission denied")
+                return real_write(path, *args, **kwargs)
+
+            err = io.StringIO()
+            pathlib.Path.write_text = read_only_disk
+            try:
+                with contextlib.redirect_stderr(err):
+                    code = web.main(["--port", "0", "--data-dir", t])
+            finally:
+                pathlib.Path.write_text = real_write
+        self.assertEqual(code, 2)
+        self.assertIn("cannot write to the data directory", err.getvalue())
+
     def test_user_text_never_becomes_an_option(self):
         op = {
             "prefix": ["x"],

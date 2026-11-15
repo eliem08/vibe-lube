@@ -754,6 +754,14 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     srv = make_server(a.host, a.port, pathlib.Path(a.data_dir), os.environ.get("API_KEYS", ""), a.rate)
     gate = srv.RequestHandlerClass.gate
+    try:  # a read-only data disk would pass the health check and then fail every request
+        probe = pathlib.Path(a.data_dir) / ".write-check"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as e:
+        srv.server_close()
+        print(f"cannot write to the data directory {a.data_dir}: {e}", file=sys.stderr)
+        return 2
     selling = srv.RequestHandlerClass.billing.enabled  # a server that sells keys will require them
     if a.host not in LOOPBACK and not gate.required() and not selling and not a.allow_public:
         srv.server_close()
