@@ -139,7 +139,8 @@ def build_argv(op: dict, payload: dict, workdir: pathlib.Path, data_dir: pathlib
                 opts.extend([f["flag"], *[str(v) for v in values]])
             continue
         else:
-            value = str(value)
+            # JSON objects/arrays sent over the API must arrive as JSON, not as a Python repr
+            value = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
             if f.get("choices") and value not in f["choices"]:
                 raise BadRequest(f"{f['dest']} must be one of {f['choices']}")
         if f["flag"] is None:
@@ -337,6 +338,9 @@ class Billing:
         self.hook_secret = env.get("STRIPE_WEBHOOK_SECRET", "")
         self.public_url = env.get("PUBLIC_URL", "").rstrip("/")
         self.prices = dict(item.split("=", 1) for item in env.get("STRIPE_PRICES", "").split(",") if "=" in item)
+        # subscriptions start with the advertised free trial; one-time plans (e.g. lifetime) are plain payments
+        self.trial_days = int(env.get("STRIPE_TRIAL_DAYS", "14") or 0)
+        self.one_time = {p.strip() for p in env.get("STRIPE_ONE_TIME_PLANS", "lifetime").split(",") if p.strip()}
         self.gate, self.pending_file = gate, data_dir / "pending-keys.json"
         self.lock = threading.Lock()
 
@@ -362,18 +366,20 @@ class Billing:
         price = self.prices.get(plan)
         if not price:
             raise BadRequest(f"unknown plan {plan!r}; choose one of {sorted(self.prices)}")
-        session = self._stripe(
-            "checkout/sessions",
-            {
-                "mode": "subscription",
-                "line_items[0][price]": price,
-                "line_items[0][quantity]": "1",
-                "metadata[plan]": plan,
-                "success_url": f"{self.public_url}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
-                "cancel_url": f"{self.public_url}/pricing",
-            },
-        )
-        return session["url"]
+        form = {
+            "line_items[0][price]": price,
+            "line_items[0][quantity]": "1",
+            "metadata[plan]": plan,
+            "success_url": f"{self.public_url}/billing/success?session_id={{CHECKOUT_SESSION_ID}}",
+            "cancel_url": f"{self.public_url}/pricing",
+        }
+        if plan in self.one_time:
+            form["mode"] = "payment"
+        else:
+            form["mode"] = "subscription"
+            if self.trial_days > 0:
+                form["subscription_data[trial_period_days]"] = str(self.trial_days)
+        return self._stripe("checkout/sessions", form)["url"]
 
     def verify(self, body: bytes, header: str, now: float | None = None) -> dict:
         """Stripe-Signature check: HMAC-SHA256 of "<t>.<body>", constant time, within a 5-minute window."""
@@ -559,6 +565,8 @@ def pricing_page(billing: Billing) -> str:
             "<h1>Pricing</h1><p>Self-serve checkout is not enabled on this server yet. "
             "See the product README for plans.</p>",
         )
+    days = billing.trial_days
+    trial = f"<p>Monthly plans start with a {days}-day free trial.</p>" if days > 0 else ""
     cards = "".join(
         f'<section><h2>{e(plan.title())}</h2><form method="post" action="/billing/checkout">'
         f'<input type="hidden" name="plan" value="{e(plan)}"><button>Subscribe</button></form></section>'
@@ -566,7 +574,7 @@ def pricing_page(billing: Billing) -> str:
     )
     return _shell(
         "Pricing",
-        f"<h1>{e(SPEC['name'])} plans</h1><p>{e(SPEC['tagline'])}</p>{cards}"
+        f"<h1>{e(SPEC['name'])} plans</h1><p>{e(SPEC['tagline'])}</p>{trial}{cards}"
         "<p><small>Payments by Stripe. Your API key appears right after checkout.</small></p>",
     )
 
