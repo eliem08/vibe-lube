@@ -144,6 +144,38 @@ class WebAppTests(unittest.TestCase):
             gate.revoke(kid)
             self.assertIsNone(gate.identify(f"Bearer {key}"))
 
+    def test_usage_log_survives_its_directory_disappearing(self):
+        with tempfile.TemporaryDirectory() as t:
+            data = pathlib.Path(t) / "data"
+            data.mkdir()
+            gate = web.Gate(data)
+            gate.record("k", "op", 200, 1)
+            (data / "usage.jsonl").unlink()
+            data.rmdir()  # e.g. a cleaner or antivirus removed it under a running server
+            gate.record("k", "op", 200, 1)  # must not raise: the directory is recreated
+            self.assertEqual(gate.usage()["k"]["calls"], 1)
+
+    def test_pricing_page_shows_plans_and_only_sells_configured_ones(self):
+        plans = SPEC.get("plans") or []
+        with tempfile.TemporaryDirectory() as t:
+            off = web.pricing_page(web.Billing(pathlib.Path(t), web.Gate(pathlib.Path(t)), {}))
+            for plan in plans:
+                self.assertIn(plan["name"], off)
+                self.assertIn(plan["features"][0], off)
+            self.assertNotIn("Subscribe", off)  # no Stripe configured: nothing is for sale here
+            if not plans:
+                return
+            key = plans[0]["key"]
+            env = {
+                "STRIPE_SECRET_KEY": "sk_test_x",
+                "STRIPE_WEBHOOK_SECRET": "whsec_x",
+                "STRIPE_PRICES": f"{key}=price_1",
+                "PUBLIC_URL": "https://example.test",
+            }
+            on = web.pricing_page(web.Billing(pathlib.Path(t), web.Gate(pathlib.Path(t)), env))
+            self.assertEqual(on.count("Subscribe"), 1)  # only the plan with a Stripe price gets a button
+            self.assertIn(f'value="{key}"', on)
+
     def test_public_bind_without_keys_is_refused(self):
         with tempfile.TemporaryDirectory() as t:
             err = io.StringIO()

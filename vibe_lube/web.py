@@ -259,8 +259,18 @@ class Gate:
                 "ms": ms,
             }
         )
-        with self.lock, open(self.usage_file, "a", encoding="utf-8") as fh:
-            fh.write(line + "\n")
+        with self.lock:
+            for attempt in (1, 2):
+                try:
+                    with open(self.usage_file, "a", encoding="utf-8") as fh:
+                        fh.write(line + "\n")
+                    return
+                except OSError as e:  # the data dir vanished or is locked: recreate it once, then give up loudly
+                    if attempt == 1:
+                        with contextlib.suppress(OSError):
+                            self.usage_file.parent.mkdir(parents=True, exist_ok=True)
+                    else:
+                        sys.stderr.write(f"usage log not written ({e}); this call is missing from metering\n")
 
     def create(self, label: str, meta: dict | None = None) -> tuple[str, str]:
         key = "sk_" + secrets.token_urlsafe(24)
@@ -556,26 +566,44 @@ code,pre{{background:var(--code);border-radius:6px;padding:2px 6px;word-break:br
 
 
 def pricing_page(billing: Billing) -> str:
+    """Plans with prices and what they include; a Subscribe button wherever checkout is configured."""
     import html
 
     e = html.escape
-    if not billing.enabled:
+    plans = SPEC.get("plans") or []
+    known = {p["key"] for p in plans}
+    # plans configured in STRIPE_PRICES that the spec does not describe still get a card
+    plans = [
+        *plans,
+        *[{"key": k, "name": k.title(), "price": "", "features": []} for k in billing.prices if k not in known],
+    ]
+    if not plans:
         return _shell(
             "Pricing",
             "<h1>Pricing</h1><p>Self-serve checkout is not enabled on this server yet. "
             "See the product README for plans.</p>",
         )
+    cards = []
+    for p in plans:
+        items = "".join(f"<li>{e(f)}</li>" for f in p["features"])
+        if billing.enabled and p["key"] in billing.prices:
+            action = (
+                '<form method="post" action="/billing/checkout">'
+                f'<input type="hidden" name="plan" value="{e(p["key"])}"><button>Subscribe</button></form>'
+            )
+        else:
+            action = "<p><small>Contact us to start this plan.</small></p>"
+        price = f"<p><strong>{e(p['price'])}</strong></p>" if p["price"] else ""
+        cards.append(f"<section><h2>{e(p['name'])}</h2>{price}<ul>{items}</ul>{action}</section>")
     days = billing.trial_days
     trial = f"<p>Monthly plans start with a {days}-day free trial.</p>" if days > 0 else ""
-    cards = "".join(
-        f'<section><h2>{e(plan.title())}</h2><form method="post" action="/billing/checkout">'
-        f'<input type="hidden" name="plan" value="{e(plan)}"><button>Subscribe</button></form></section>'
-        for plan in billing.prices
+    foot = (
+        "<p><small>Payments by Stripe. Your API key appears right after checkout.</small></p>"
+        if billing.enabled
+        else ""
     )
     return _shell(
-        "Pricing",
-        f"<h1>{e(SPEC['name'])} plans</h1><p>{e(SPEC['tagline'])}</p>{trial}{cards}"
-        "<p><small>Payments by Stripe. Your API key appears right after checkout.</small></p>",
+        "Pricing", f"<h1>{e(SPEC['name'])} plans</h1><p>{e(SPEC['tagline'])}</p>{trial}{''.join(cards)}{foot}"
     )
 
 
