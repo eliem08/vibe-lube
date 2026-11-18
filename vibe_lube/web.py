@@ -37,6 +37,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PKG = __package__ or "app"
 SPEC = importlib.import_module(f"{PKG}._webspec").SPEC
 OPS = {op["id"]: op for op in SPEC["ops"]}
+try:  # optional product routes, e.g. carrier webhooks; each one must authenticate its own caller
+    ROUTES = importlib.import_module(f"{PKG}.routes").ROUTES
+except ModuleNotFoundError as e:
+    if e.name != f"{PKG}.routes":
+        raise
+    ROUTES = {}
 MAX_BODY = 5 * 1024 * 1024
 TIMEOUT = 30
 HEADERS = {
@@ -561,6 +567,13 @@ class Handler(BaseHTTPRequestHandler):
             except (BadRequest, OSError, KeyError, ValueError) as e:
                 return self._json(400, {"error": str(e)})
             return self._send(303, b"", "text/plain", {"Location": url})
+        if path in ROUTES:  # signed by a third party (e.g. a carrier), not an API-key client
+            try:
+                status, ctype, out = ROUTES[path](self, body)
+            except Exception as e:  # never leak a traceback to a webhook caller
+                sys.stderr.write(f"route {path} failed: {e!r}\n")
+                return self._json(500, {"error": "internal error"})
+            return self._send(status, out, ctype)
         op = OPS.get(path.removeprefix("/api/")) if path.startswith("/api/") else None
         if not op:
             return self._json(404, {"error": "unknown command", "commands": sorted(OPS)})

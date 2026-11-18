@@ -70,7 +70,7 @@
      },
      {
       "name": "render.yaml",
-      "content": "# One-click deploy: https://render.com/deploy?repo=https://github.com/eliem08/vibe-lube\nservices:\n  - type: web\n    name: vibe-lube\n    runtime: docker\n    plan: starter\n    healthCheckPath: /healthz\n    disk:\n      name: data\n      mountPath: /data\n      sizeGB: 1\n    envVars:\n      - key: API_KEYS\n        sync: false\n      - key: STRIPE_SECRET_KEY\n        sync: false\n      - key: STRIPE_WEBHOOK_SECRET\n        sync: false\n      - key: STRIPE_PRICES\n        sync: false\n      - key: PUBLIC_URL\n        sync: false\n"
+      "content": "# One-click deploy: https://render.com/deploy?repo=https://github.com/eliem08/vibe-lube\nservices:\n  - type: web\n    name: vibe-lube\n    runtime: docker\n    plan: starter\n    healthCheckPath: /healthz\n    disk:\n      name: data\n      mountPath: /data\n      sizeGB: 1\n    envVars:\n      - key: API_KEYS\n        sync: false\n      - key: STRIPE_SECRET_KEY\n        sync: false\n      - key: STRIPE_WEBHOOK_SECRET\n        sync: false\n      - key: STRIPE_PRICES\n        sync: false\n      - key: PUBLIC_URL\n        sync: false\n      - key: PLAN_QUOTAS\n        sync: false\n"
      },
      {
       "name": "tests/__init__.py",
@@ -171,7 +171,7 @@
      },
      {
       "name": "render.yaml",
-      "content": "# One-click deploy: https://render.com/deploy?repo=https://github.com/eliem08/vibe-lube\nservices:\n  - type: web\n    name: vibe-lube\n    runtime: docker\n    plan: starter\n    healthCheckPath: /healthz\n    disk:\n      name: data\n      mountPath: /data\n      sizeGB: 1\n    envVars:\n      - key: API_KEYS\n        sync: false\n      - key: STRIPE_SECRET_KEY\n        sync: false\n      - key: STRIPE_WEBHOOK_SECRET\n        sync: false\n      - key: STRIPE_PRICES\n        sync: false\n      - key: PUBLIC_URL\n        sync: false\n"
+      "content": "# One-click deploy: https://render.com/deploy?repo=https://github.com/eliem08/vibe-lube\nservices:\n  - type: web\n    name: vibe-lube\n    runtime: docker\n    plan: starter\n    healthCheckPath: /healthz\n    disk:\n      name: data\n      mountPath: /data\n      sizeGB: 1\n    envVars:\n      - key: API_KEYS\n        sync: false\n      - key: STRIPE_SECRET_KEY\n        sync: false\n      - key: STRIPE_WEBHOOK_SECRET\n        sync: false\n      - key: STRIPE_PRICES\n        sync: false\n      - key: PUBLIC_URL\n        sync: false\n      - key: PLAN_QUOTAS\n        sync: false\n"
      },
      {
       "name": "tests/__init__.py",
