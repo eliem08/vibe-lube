@@ -83,6 +83,16 @@ Proprietary. Copyright (c) 2026 eliem08. All rights reserved. Use requires a pai
     `CORS(*)` / `Access-Control-Allow-Origin: *`, `debug=True`
   - **maintainability**: no tests, no README, 1,000+ line files, stray `console.log`, TODOs
 - **Health score** (0–100) and grade, findings grouped by severity
+- **Confidence on every finding** (high, medium, low): a provider-format key is high, a random-looking generic
+  token is medium, a placeholder like `your-password-here`, a low-randomness string or commented-out code is low.
+  Low findings are listed under "worth a look" and never cost points or appear in the quote. Filter with
+  `--min-confidence medium`.
+- **Silencing false positives**, three ways:
+  - inline: `# vibe-lube: ignore` on the line or the line above, or `ignore[eval]` for one rule only
+  - a `.vibe-lube-ignore` file: a rule (`console_logs`), a path (`vendor/`), both (`secret_in_code:tests/fixtures/*`)
+    or a finding's fingerprint from `--json`
+  - a baseline: `--write-baseline .vibe-lube-baseline.json` accepts today's findings, then `--baseline` reports only
+    new ones. Fingerprints use the line's text, not its number, so edits elsewhere in the file don't resurface them.
 - **Service menu**: each finding maps to a fix with an estimated time/price
 - **`--fix`**: safe auto-fixes only — add `.env` to `.gitignore`, generate `.env.example`
   from referenced variable names (never values)
@@ -94,6 +104,8 @@ pip install -e .
 vibe-lube inspect ./my-lovable-app
 vibe-lube inspect ./my-lovable-app --fix
 vibe-lube inspect . --json
+vibe-lube inspect . --write-baseline .vibe-lube-baseline.json   # accept what is there today
+vibe-lube inspect . --baseline .vibe-lube-baseline.json          # then fail CI only on new problems
 ```
 
 ## Roadmap
