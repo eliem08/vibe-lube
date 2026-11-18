@@ -144,6 +144,53 @@ class WebAppTests(unittest.TestCase):
             gate.revoke(kid)
             self.assertIsNone(gate.identify(f"Bearer {key}"))
 
+    def test_plan_quota_blocks_at_the_limit_and_survives_a_restart(self):
+        with tempfile.TemporaryDirectory() as t:
+            data = pathlib.Path(t)
+            gate = web.Gate(data)
+            _, team_key = gate.create("acme", {"plan": "team"})
+            _, free_key = gate.create("indie", {"plan": "unlisted"})
+            env = {"PLAN_QUOTAS": "team=2"}
+
+            def serve():
+                srv = web.make_server("127.0.0.1", 0, data, env=env)
+                threading.Thread(target=srv.serve_forever, daemon=True).start()
+                return srv
+
+            def post(srv, key):
+                url = f"http://127.0.0.1:{srv.server_address[1]}/api/{SPEC['ops'][0]['id']}"
+                headers = {"Content-Type": "application/json", "Authorization": f"Bearer {key}"}
+                req = urllib.request.Request(url, data=b"{}", headers=headers)
+                try:
+                    with urllib.request.urlopen(req, timeout=90) as r:
+                        return r.status
+                except urllib.error.HTTPError as e:
+                    with e:
+                        return e.code
+
+            # count successful calls directly so the test does not depend on what an empty payload returns
+            month = time.strftime("%Y-%m", time.gmtime())
+            kid = web.Gate(data).identify(f"Bearer {team_key}")
+            srv = serve()
+            try:
+                g = srv.RequestHandlerClass.gate
+                g.record(kid, "op", 200, 1)
+                g.record(kid, "op", 400, 1)  # failed calls do not use quota
+                self.assertNotEqual(post(srv, team_key), 429)
+                g.record(kid, "op", 200, 1)
+                self.assertEqual(post(srv, team_key), 429)
+                self.assertNotEqual(post(srv, free_key), 429)  # a plan without a quota is unlimited
+            finally:
+                srv.shutdown()
+                srv.server_close()
+            srv = serve()  # a restart rebuilds the count from the usage log
+            try:
+                self.assertEqual(post(srv, team_key), 429)
+                self.assertGreaterEqual(srv.RequestHandlerClass.gate._calls()[(kid, month)], 2)
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
     def test_usage_log_survives_its_directory_disappearing(self):
         with tempfile.TemporaryDirectory() as t:
             data = pathlib.Path(t) / "data"

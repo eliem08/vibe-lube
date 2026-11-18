@@ -204,12 +204,44 @@ class Gate:
     hashes. With no keys configured the API is open, which `main` allows only on a loopback address.
     """
 
-    def __init__(self, data_dir: pathlib.Path, env_keys: str = "", rate_per_min: int = 60):
+    def __init__(self, data_dir: pathlib.Path, env_keys: str = "", rate_per_min: int = 60, quotas: str = ""):
         self.keys_file, self.usage_file = data_dir / "api-keys.json", data_dir / "usage.jsonl"
         self.env = {_digest(k.strip()): f"env-{i}" for i, k in enumerate(env_keys.split(","), 1) if k.strip()}
         self.rate = rate_per_min
         self.hits: dict[str, list[float]] = {}
         self.lock = threading.Lock()
+        # PLAN_QUOTAS="team=1000,business=20000": successful calls per key per calendar month, by the plan
+        # recorded on the key at checkout. Plans not listed, and keys from API_KEYS, are unlimited.
+        self.quotas = {}
+        for item in quotas.split(","):
+            plan, sep, n = item.partition("=")
+            if sep and plan.strip() and n.strip().isdigit():
+                self.quotas[plan.strip()] = int(n)
+        self.month_calls: dict[tuple[str, str], int] | None = None  # (key id, "YYYY-MM") -> calls
+
+    def _calls(self) -> dict[tuple[str, str], int]:
+        """Successful calls this month per key, rebuilt from the usage log once, then kept in memory."""
+        if self.month_calls is None:
+            counts: dict[tuple[str, str], int] = {}
+            with contextlib.suppress(OSError):
+                for ln in self.usage_file.read_text(encoding="utf-8").splitlines():
+                    with contextlib.suppress(ValueError, KeyError, TypeError):
+                        rec = json.loads(ln)
+                        if rec["status"] == 200:
+                            k = (rec["key"], rec["ts"][:7])
+                            counts[k] = counts.get(k, 0) + 1
+            self.month_calls = counts
+        return self.month_calls
+
+    def quota(self, caller: str) -> tuple[int, int] | None:
+        """(used, limit) when the caller's plan has a monthly quota, else None."""
+        if not self.quotas:
+            return None
+        limit = self.quotas.get(self.stored().get(caller, {}).get("plan", ""))
+        if limit is None:
+            return None
+        with self.lock:
+            return self._calls().get((caller, time.strftime("%Y-%m", time.gmtime())), 0), limit
 
     def stored(self) -> dict:
         try:
@@ -260,6 +292,9 @@ class Gate:
             }
         )
         with self.lock:
+            if status == 200 and self.month_calls is not None:
+                k = (caller, time.strftime("%Y-%m", time.gmtime()))
+                self.month_calls[k] = self.month_calls.get(k, 0) + 1
             for attempt in (1, 2):
                 try:
                     with open(self.usage_file, "a", encoding="utf-8") as fh:
@@ -539,6 +574,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(
                 429, {"error": f"rate limit: {self.gate.rate} requests per minute"}, {"Retry-After": str(wait)}
             )
+        quota = self.gate.quota(caller)
+        if quota and quota[0] >= quota[1]:
+            self.gate.record(caller, op["id"], 429, 0)
+            msg = (
+                f"monthly quota of {quota[1]:,} calls reached for this plan; upgrade on /pricing or wait for next month"
+            )
+            return self._json(429, {"error": msg, "used": quota[0], "limit": quota[1]})
         started = time.monotonic()
         try:
             payload = json.loads(body or b"{}")
@@ -723,7 +765,8 @@ def make_server(
     host: str, port: int, data_dir: pathlib.Path, env_keys: str = "", rate: int = 60, env: dict | None = None
 ) -> ThreadingHTTPServer:
     data_dir.mkdir(parents=True, exist_ok=True)
-    gate = Gate(data_dir.resolve(), env_keys, rate)
+    quotas = (os.environ if env is None else env).get("PLAN_QUOTAS", "")
+    gate = Gate(data_dir.resolve(), env_keys, rate, quotas)
     billing = Billing(data_dir.resolve(), gate, env)
     bound = {"data_dir": data_dir.resolve(), "gate": gate, "billing": billing}
     handler = type("BoundHandler", (Handler,), bound)
@@ -736,7 +779,9 @@ def keys_main(argv: list) -> int:
     ap.add_argument("--data-dir", default=os.environ.get("DATA_DIR", "data"))
     sub = ap.add_subparsers(dest="cmd", required=True)
     k = sub.add_parser("keys").add_subparsers(dest="action", required=True)
-    k.add_parser("create").add_argument("--label", required=True, help="who the key is for, e.g. a customer")
+    kc = k.add_parser("create")
+    kc.add_argument("--label", required=True, help="who the key is for, e.g. a customer")
+    kc.add_argument("--plan", default="", help="plan name, so PLAN_QUOTAS applies to this key")
     k.add_parser("list")
     k.add_parser("revoke").add_argument("key_id")
     sub.add_parser("usage", help="calls per key, for billing")
@@ -747,7 +792,7 @@ def keys_main(argv: list) -> int:
     if a.cmd == "usage":
         print(json.dumps(gate.usage(), indent=2))
     elif a.action == "create":
-        kid, key = gate.create(a.label)
+        kid, key = gate.create(a.label, {"plan": a.plan} if a.plan else None)
         print(f"key id {kid} for {a.label!r}\n{key}\nShown once; only its hash is stored.")
     elif a.action == "list":
         for kid, rec in gate.stored().items():

@@ -20,3 +20,5 @@ services:
         sync: false
       - key: PUBLIC_URL
         sync: false
+      - key: PLAN_QUOTAS
+        sync: false
