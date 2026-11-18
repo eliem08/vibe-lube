@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
+import math
 import os
 import re
 from dataclasses import asdict, dataclass, field
 
-__all__ = ["Finding", "Report", "inspect", "apply_safe_fixes", "SERVICE_MENU"]
+__all__ = ["Finding", "Report", "inspect", "apply_safe_fixes", "load_baseline", "write_baseline", "SERVICE_MENU"]
 
 SKIP_DIRS = {
     ".git",
@@ -173,6 +175,78 @@ class Finding:
     line: int
     detail: str
     fix: str
+    confidence: str = "high"  # high / medium / low; low findings are listed but cost no points
+    fingerprint: str = ""  # stable across line moves: rule + file + the line's text
+
+
+IGNORE_FILE = ".vibe-lube-ignore"
+INLINE_IGNORE = re.compile(r"vibe-lube:\s*ignore(?:\[([\w,\s-]+)\])?")
+PLACEHOLDER = re.compile(
+    r"(?i)^(?:your|my|change|replace|insert|dummy|fake|test|sample|placeholder|todo|redacted|none|null)"
+    r"|<[^>]*>|\$\{|\{\{|%s|x{4,}|\*{4,}|^(.)\1+$"
+)
+PROVIDER_SECRETS = {n for n, _ in SECRET_PATTERNS} - {"generic_secret"}
+COMMENT = re.compile(r"^\s*(?:#|//|/\*|\*|<!--|--)")
+
+
+def _entropy(s: str) -> float:
+    counts = {c: s.count(c) for c in set(s)}
+    return -sum(n / len(s) * math.log2(n / len(s)) for n in counts.values()) if s else 0.0
+
+
+def _secret_confidence(name: str, value: str) -> str:
+    inner = value.split("=", 1)[-1].split(":", 1)[-1].strip().strip("\"'")
+    if PLACEHOLDER.search(inner):
+        return "low"
+    if name in PROVIDER_SECRETS:
+        return "high"
+    return "medium" if _entropy(inner) >= 3.0 else "low"  # real keys are random; "password123" is not
+
+
+def _fingerprint(rule: str, rel: str, text: str) -> str:
+    return hashlib.sha256(f"{rule}|{rel}|{' '.join(text.split())}".encode()).hexdigest()[:16]
+
+
+def load_ignores(root: str) -> list[tuple[str, str]]:
+    """(rule or '*', path glob or '*') pairs, or ('fp', fingerprint), from .vibe-lube-ignore.
+
+    Lines: `rule`, `path/glob/**`, `rule:path/glob`, or a 16-character fingerprint. `#` starts a comment.
+    """
+    path = os.path.join(root, IGNORE_FILE)
+    out = []
+    if not os.path.exists(path):
+        return out
+    rules = set(SERVICE_MENU)
+    with open(path, encoding="utf-8", errors="ignore") as fh:
+        for raw in fh:
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            if re.fullmatch(r"[0-9a-f]{16}", line):
+                out.append(("fp", line))
+            elif ":" in line and line.split(":", 1)[0] in rules:
+                rule, glob = line.split(":", 1)
+                out.append((rule, glob.strip()))
+            elif line in rules:
+                out.append((line, "*"))
+            else:
+                out.append(("*", line))
+    return out
+
+
+def _ignored(f, ignores) -> bool:
+    for rule, glob in ignores:
+        if rule == "fp":
+            if f.fingerprint == glob:
+                return True
+        elif rule in ("*", f.rule) and (
+            glob == "*"
+            or fnmatch.fnmatchcase(f.file, glob.rstrip("/"))
+            or fnmatch.fnmatchcase(f.file, glob.rstrip("/") + "/*")
+            or f.file.startswith(glob.rstrip("/*") + "/")
+        ):
+            return True
+    return False
 
 
 @dataclass
@@ -185,6 +259,7 @@ class Report:
     env_vars: list = field(default_factory=list)
     quote_minutes: int = 0
     quote_usd: int = 0
+    suppressed: int = 0  # hidden by inline comments, .vibe-lube-ignore or the baseline
 
     def to_dict(self):
         return asdict(self)
@@ -230,14 +305,25 @@ def _gitignored(root: str, rel: str) -> bool:
     return ignored
 
 
-def inspect(root: str) -> Report:
+def inspect(root: str, baseline: set | None = None) -> Report:
     rep = Report(root=root, files_scanned=0)
     env_vars: set[str] = set()
     console_logs, todos = 0, 0
     has_tests = False
+    lines: list[str] = []
+    ignores = load_ignores(root)
 
-    def add(rule, sev, path, line, detail, fix):
-        rep.findings.append(Finding(rule, sev, os.path.relpath(path, root).replace("\\", "/"), line, detail, fix))
+    def add(rule, sev, path, line, detail, fix, confidence="high"):
+        rel = os.path.relpath(path, root).replace("\\", "/")
+        text = lines[line - 1] if 0 < line <= len(lines) else detail
+        for near in (text, lines[line - 2] if line >= 2 and line - 2 < len(lines) else ""):
+            m = INLINE_IGNORE.search(near)  # on the line itself or in a comment just above it
+            if m and (not m.group(1) or rule in [r.strip() for r in m.group(1).split(",")]):
+                rep.suppressed += 1
+                return
+        if line and COMMENT.match(text) and confidence == "high":
+            confidence = "medium" if rule == "secret_in_code" else "low"  # commented-out code
+        rep.findings.append(Finding(rule, sev, rel, line, detail, fix, confidence, _fingerprint(rule, rel, text)))
 
     for path in _walk(root):
         rel = os.path.relpath(path, root).replace("\\", "/")
@@ -279,6 +365,9 @@ def inspect(root: str) -> Report:
                 for name, rx in SECRET_PATTERNS:
                     m = rx.search(line)
                     if m and "example" not in line.lower() and "xxxx" not in m.group(0).lower():
+                        conf = _secret_confidence(name, m.group(0))
+                        if is_test and conf != "high":
+                            conf = "low"  # fixtures in tests are usually fake
                         add(
                             "secret_in_code",
                             "critical",
@@ -286,6 +375,7 @@ def inspect(root: str) -> Report:
                             i,
                             f"{name}: {_mask(m.group(0))}",
                             "Rotate this key now, then load it from an environment variable.",
+                            conf,
                         )
                         break
             for m in ENV_REF.finditer(line):
@@ -376,9 +466,16 @@ def inspect(root: str) -> Report:
         )
 
     rep.env_vars = sorted(env_vars)
+    for f in rep.findings:
+        if not f.fingerprint:
+            f.fingerprint = _fingerprint(f.rule, f.file, f.detail)
+    kept = [f for f in rep.findings if not _ignored(f, ignores) and f.fingerprint not in (baseline or ())]
+    rep.suppressed += len(rep.findings) - len(kept)
+    rep.findings = kept
     sev_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
-    rep.findings.sort(key=lambda f: (sev_rank[f.severity], f.file, f.line))
-    penalty = sum(SEVERITY_POINTS[f.severity] for f in rep.findings)
+    conf_rank = {"high": 0, "medium": 1, "low": 2}
+    rep.findings.sort(key=lambda f: (conf_rank[f.confidence] == 2, sev_rank[f.severity], f.file, f.line))
+    penalty = sum(SEVERITY_POINTS[f.severity] for f in rep.findings if f.confidence != "low")
     rep.score = max(0, 100 - penalty)
     rep.grade = (
         "A"
@@ -391,10 +488,27 @@ def inspect(root: str) -> Report:
         if rep.score >= 40
         else "F"
     )
-    rules = {f.rule for f in rep.findings}
+    rules = {f.rule for f in rep.findings if f.confidence != "low"}
     rep.quote_minutes = sum(SERVICE_MENU[r][1] for r in rules)
     rep.quote_usd = sum(SERVICE_MENU[r][2] for r in rules)
     return rep
+
+
+def write_baseline(path: str, rep: Report) -> int:
+    """Record today's findings so later scans report only new ones. Returns how many were recorded."""
+    doc = {"version": 1, "fingerprints": sorted({f.fingerprint for f in rep.findings})}
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=2)
+        fh.write("\n")
+    return len(doc["fingerprints"])
+
+
+def load_baseline(path: str) -> set:
+    with open(path, encoding="utf-8-sig") as fh:
+        doc = json.load(fh)
+    if not isinstance(doc, dict) or not isinstance(doc.get("fingerprints"), list):
+        raise ValueError(f"{path}: not a vibe-lube baseline")
+    return set(doc["fingerprints"])
 
 
 def apply_safe_fixes(root: str, rep: Report) -> list[str]:
