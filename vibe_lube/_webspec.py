@@ -46,7 +46,7 @@ SPEC = {
                 {
                     "dest": "baseline",
                     "flag": "--baseline",
-                    "kind": "text",
+                    "kind": "file",
                     "required": False,
                     "choices": None,
                     "default": None,
@@ -57,7 +57,7 @@ SPEC = {
                 {
                     "dest": "write_baseline",
                     "flag": "--write-baseline",
-                    "kind": "text",
+                    "kind": "output",
                     "required": False,
                     "choices": None,
                     "default": None,

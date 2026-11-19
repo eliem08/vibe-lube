@@ -542,6 +542,29 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": "not found"})
 
+    def api_caller(self, op_id: str) -> str | None:
+        """Check the API key, rate limit and monthly quota for one call. Returns the caller, or None after
+        answering 401/429 itself. Product routes that serve API-key clients use this too."""
+        caller = self.gate.identify(self.headers.get("Authorization"))
+        if caller is None and (self.gate.required() or self.billing.enabled):
+            self.gate.record("unauthenticated", op_id, 401, 0)
+            self._json(401, {"error": "missing or invalid API key"}, {"WWW-Authenticate": "Bearer"})
+            return None
+        caller = caller or f"ip:{self.client_address[0]}"
+        wait = self.gate.retry_after(caller)
+        if wait:
+            self._json(429, {"error": f"rate limit: {self.gate.rate} requests per minute"}, {"Retry-After": str(wait)})
+            return None
+        quota = self.gate.quota(caller)
+        if quota and quota[0] >= quota[1]:
+            self.gate.record(caller, op_id, 429, 0)
+            msg = (
+                f"monthly quota of {quota[1]:,} calls reached for this plan; upgrade on /pricing or wait for next month"
+            )
+            self._json(429, {"error": msg, "used": quota[0], "limit": quota[1]})
+            return None
+        return caller
+
     def do_POST(self):
         path = self.path.split("?", 1)[0]
         try:
@@ -569,31 +592,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(303, b"", "text/plain", {"Location": url})
         if path in ROUTES:  # signed by a third party (e.g. a carrier), not an API-key client
             try:
-                status, ctype, out = ROUTES[path](self, body)
+                res = ROUTES[path](self, body)  # None: the route already answered (e.g. via api_caller)
             except Exception as e:  # never leak a traceback to a webhook caller
                 sys.stderr.write(f"route {path} failed: {e!r}\n")
                 return self._json(500, {"error": "internal error"})
-            return self._send(status, out, ctype)
+            return None if res is None else self._send(res[0], res[2], res[1])
         op = OPS.get(path.removeprefix("/api/")) if path.startswith("/api/") else None
         if not op:
             return self._json(404, {"error": "unknown command", "commands": sorted(OPS)})
-        caller = self.gate.identify(self.headers.get("Authorization"))
-        if caller is None and (self.gate.required() or self.billing.enabled):
-            self.gate.record("unauthenticated", op["id"], 401, 0)
-            return self._json(401, {"error": "missing or invalid API key"}, {"WWW-Authenticate": "Bearer"})
-        caller = caller or f"ip:{self.client_address[0]}"
-        wait = self.gate.retry_after(caller)
-        if wait:
-            return self._json(
-                429, {"error": f"rate limit: {self.gate.rate} requests per minute"}, {"Retry-After": str(wait)}
-            )
-        quota = self.gate.quota(caller)
-        if quota and quota[0] >= quota[1]:
-            self.gate.record(caller, op["id"], 429, 0)
-            msg = (
-                f"monthly quota of {quota[1]:,} calls reached for this plan; upgrade on /pricing or wait for next month"
-            )
-            return self._json(429, {"error": msg, "used": quota[0], "limit": quota[1]})
+        caller = self.api_caller(op["id"])
+        if caller is None:
+            return None
         started = time.monotonic()
         try:
             payload = json.loads(body or b"{}")
